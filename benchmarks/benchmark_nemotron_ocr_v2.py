@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import subprocess
 import time
@@ -23,6 +24,10 @@ SAFEDOCS_1K_URL = (
     "CC-MAIN-2021-31-PDF-UNTRUNCATED/zipfiles/0000-0999/0000.zip"
 )
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
+GPU_TRACE_QUERY = (
+    "timestamp,utilization.gpu,utilization.memory,memory.used,memory.total,"
+    "temperature.gpu,power.draw,power.limit,clocks.sm,clocks.mem,pstate"
+)
 
 
 def parse_args():
@@ -67,6 +72,17 @@ def parse_args():
         ),
     )
     parser.add_argument("--output-json", type=Path)
+    parser.add_argument(
+        "--gpu-trace-csv",
+        type=Path,
+        help="Write a sampled nvidia-smi GPU utilization trace around the run.",
+    )
+    parser.add_argument(
+        "--gpu-trace-interval-ms",
+        type=int,
+        default=500,
+        help="Sampling interval for --gpu-trace-csv.",
+    )
     parser.add_argument(
         "--disable-io-processor",
         action="store_true",
@@ -232,6 +248,81 @@ def batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
         yield items[start : start + batch_size]
 
 
+def start_gpu_trace(path: Path, interval_ms: int) -> tuple[subprocess.Popen, Any]:
+    if interval_ms <= 0:
+        raise ValueError("--gpu-trace-interval-ms must be positive.")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output = path.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        [
+            "nvidia-smi",
+            f"--query-gpu={GPU_TRACE_QUERY}",
+            "--format=csv",
+            "-lms",
+            str(interval_ms),
+        ],
+        stdout=output,
+        stderr=subprocess.DEVNULL,
+    )
+    return proc, output
+
+
+def stop_gpu_trace(proc: subprocess.Popen, output: Any):
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    output.close()
+
+
+def parse_metric(value: str) -> float | None:
+    stripped = value.strip()
+    if stripped in {"", "[Not Supported]"}:
+        return None
+    token = stripped.split()[0]
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def summarize_gpu_trace(path: Path) -> dict[str, float | int] | None:
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is not None:
+            reader.fieldnames = [name.strip() for name in reader.fieldnames]
+        rows = [{key.strip(): value for key, value in row.items()} for row in reader]
+    if not rows:
+        return None
+
+    def values(column: str) -> list[float]:
+        parsed = [parse_metric(row.get(column, "")) for row in rows]
+        return [value for value in parsed if value is not None]
+
+    summary: dict[str, float | int] = {"gpu_trace_samples": len(rows)}
+    for column, prefix in (
+        ("utilization.gpu [%]", "gpu_util_pct"),
+        ("utilization.memory [%]", "gpu_mem_util_pct"),
+        ("memory.used [MiB]", "gpu_memory_used_mib"),
+        ("temperature.gpu", "gpu_temp_c"),
+        ("power.draw [W]", "gpu_power_w"),
+        ("clocks.current.sm [MHz]", "gpu_clocks_sm_mhz"),
+        ("clocks.current.memory [MHz]", "gpu_clocks_mem_mhz"),
+    ):
+        vals = values(column)
+        if vals:
+            summary[f"{prefix}_avg"] = sum(vals) / len(vals)
+            summary[f"{prefix}_max"] = max(vals)
+
+    return summary
+
+
 def hf_overrides(args, *, use_io_processor: bool = True) -> dict[str, Any]:
     overrides = {
         "model_type": "nemotron_ocr_v2",
@@ -358,10 +449,22 @@ def main():
         raise ValueError("Pass --image-dir or --prepare-safedocs.")
 
     images = list_images(image_dir, limit=args.limit, offset=args.image_offset)
-    if args.backend == "vllm":
-        result = run_vllm_backend(args, images)
-    else:
-        result = run_direct_backend(args, images)
+    trace_proc = None
+    trace_output = None
+    try:
+        if args.gpu_trace_csv is not None:
+            trace_proc, trace_output = start_gpu_trace(
+                args.gpu_trace_csv,
+                args.gpu_trace_interval_ms,
+            )
+
+        if args.backend == "vllm":
+            result = run_vllm_backend(args, images)
+        else:
+            result = run_direct_backend(args, images)
+    finally:
+        if trace_proc is not None and trace_output is not None:
+            stop_gpu_trace(trace_proc, trace_output)
 
     result.update(
         {
@@ -371,10 +474,17 @@ def main():
             "image_offset": args.image_offset,
             "infer_length": args.infer_length,
             "profile_ocr": args.profile_ocr,
+            "gpu_trace_csv": (
+                str(args.gpu_trace_csv) if args.gpu_trace_csv is not None else None
+            ),
             "images_per_second": result["count"] / result["elapsed_s"],
             "ms_per_image": result["elapsed_s"] * 1000 / result["count"],
         }
     )
+    if args.gpu_trace_csv is not None:
+        summary = summarize_gpu_trace(args.gpu_trace_csv)
+        if summary is not None:
+            result.update(summary)
     print(json.dumps(result, indent=2))
 
     if args.output_json is not None:
