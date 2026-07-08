@@ -47,6 +47,12 @@ def parse_args():
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.92,
+        help="Fraction of GPU memory each vLLM engine may reserve.",
+    )
+    parser.add_argument(
         "--request-batch-size",
         type=int,
         default=0,
@@ -349,6 +355,7 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
         enforce_eager=True,
         io_processor_plugin=None if args.disable_io_processor else "nemotron_ocr_v2",
         max_num_seqs=max(args.batch_size, 1),
+        gpu_memory_utilization=args.gpu_memory_utilization,
         hf_overrides=hf_overrides(
             args,
             use_io_processor=not args.disable_io_processor,
@@ -395,6 +402,7 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
         "elapsed_s": elapsed,
         "request_batch_size": request_batch_size,
         "max_num_seqs": args.batch_size,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
         "plugin_prompt_mode": args.plugin_prompt_mode,
     }
 
