@@ -247,6 +247,10 @@ _EMBEDDING_MODELS = {
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
     "LlamaNemotronVLModel": ("nemotron_vl", "LlamaNemotronVLForEmbedding"),
+    "NemotronOCRV2ForImageToText": (
+        "nemotron_ocr",
+        "NemotronOCRV2ForImageToText",
+    ),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
         "LlavaNextForConditionalGeneration",

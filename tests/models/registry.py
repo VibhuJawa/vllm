@@ -638,6 +638,16 @@ _EMBEDDING_EXAMPLE_MODELS = {
         # This is to avoid the model going OOM in CI
         max_num_seqs=32,
     ),
+    "NemotronOCRV2ForImageToText": _HfExamplesInfo(
+        "nvidia/nemotron-ocr-v2",
+        dtype="float16",
+        enforce_eager=True,
+        require_embed_inputs=True,
+        hf_overrides={
+            "model_type": "nemotron_ocr_v2",
+            "architectures": ["NemotronOCRV2ForImageToText"],
+        },
+    ),
 }
 
 _LATE_INTERACTION_EXAMPLE_MODELS = {
