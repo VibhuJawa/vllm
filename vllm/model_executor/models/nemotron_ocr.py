@@ -315,6 +315,9 @@ class NemotronOCRV2ForImageToText(nn.Module, IsAttentionFree, SupportsMultiModal
     ) -> torch.Tensor:
         return torch.empty((input_ids.shape[0], 0), device=input_ids.device)
 
+    def get_language_model(self) -> nn.Module:
+        return self
+
     def _resolve_relative_model_dir(self, value: str) -> str | None:
         path = Path(value).expanduser()
         if path.is_dir() and _complete_checkpoint_dir(path):
@@ -475,6 +478,4 @@ class NemotronOCRV2ForImageToText(nn.Module, IsAttentionFree, SupportsMultiModal
         return self._encode_payloads(payloads, device)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        for _ in weights:
-            pass
         return set()

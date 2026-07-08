@@ -3,12 +3,15 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 from PIL import Image
 
+from vllm.config.model import ModelConfig
 from vllm.model_executor.models.nemotron_ocr import (
+    NemotronOCRV2ForImageToText,
     _image_to_chw_uint8,
     _json_to_tensor,
     tensor_to_json,
@@ -16,6 +19,7 @@ from vllm.model_executor.models.nemotron_ocr import (
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.plugins.io_processors.nemotron_ocr import NemotronOCRV2IOProcessor
 from vllm.transformers_utils.config import get_config
+from vllm.transformers_utils.configs.nemotron_ocr import NemotronOCRV2Config
 
 
 def test_empty_config_can_use_nemotron_ocr_hf_overrides(tmp_path: Path):
@@ -50,6 +54,30 @@ def test_nemotron_ocr_config_can_carry_model_fork_subdir(tmp_path: Path):
     assert config.architectures == ["NemotronOCRV2ForImageToText"]
 
 
+def test_nemotron_ocr_generation_config_falls_back_to_loaded_config(monkeypatch):
+    def raise_value_error(*args, **kwargs):
+        raise ValueError("empty upstream config")
+
+    monkeypatch.setattr(
+        "vllm.config.model.try_get_generation_config", raise_value_error
+    )
+
+    model_config = SimpleNamespace(
+        generation_config="auto",
+        hf_config_path=None,
+        model="nvidia/nemotron-ocr-v2",
+        trust_remote_code=False,
+        revision=None,
+        config_format="auto",
+        hf_token=None,
+        hf_config=NemotronOCRV2Config(),
+    )
+
+    config = ModelConfig.try_get_generation_config(model_config)
+
+    assert config["_from_model_config"] is True
+
+
 def test_image_to_chw_uint8_accepts_common_image_types():
     pil_image = Image.new("RGB", (5, 3), color="white")
     np_image = np.ones((3, 5, 3), dtype=np.float32)
@@ -70,6 +98,25 @@ def test_nemotron_ocr_payload_codec_round_trip():
     tensor = _json_to_tensor(payload, device=torch.device("cpu"))
 
     assert tensor_to_json(tensor) == payload
+
+
+def test_nemotron_ocr_model_loader_does_not_consume_hf_weight_iterator():
+    hf_config = NemotronOCRV2Config()
+    model_config = SimpleNamespace(
+        model="nvidia/nemotron-ocr-v2",
+        revision=None,
+        hf_config=hf_config,
+    )
+    model = NemotronOCRV2ForImageToText(
+        SimpleNamespace(model_config=model_config),
+    )
+
+    def raise_if_iterated():
+        raise AssertionError("Nemotron OCR should not consume top-level HF weights")
+        yield
+
+    assert model.load_weights(raise_if_iterated()) == set()
+    assert model.get_language_model() is model
 
 
 def test_nemotron_ocr_io_processor_round_trip(tmp_path: Path):
