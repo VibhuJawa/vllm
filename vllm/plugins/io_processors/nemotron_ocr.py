@@ -12,23 +12,62 @@ import numpy as np
 import torch
 from PIL import Image
 
+from vllm.config import VllmConfig
 from vllm.model_executor.models.nemotron_ocr import tensor_to_json
+from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import BaseRenderer
 
 OCRInput = Image.Image | np.ndarray | torch.Tensor | bytes | str | Path
+_URL_PREFIXES = ("data:", "http://", "https://", "file://")
 
 
 class NemotronOCRV2IOProcessor(IOProcessor[OCRInput | list[OCRInput], Any]):
+    def __init__(
+        self,
+        vllm_config: VllmConfig | None,
+        renderer: BaseRenderer | None,
+    ):
+        super().__init__(vllm_config, renderer)
+
+        model_config = getattr(vllm_config, "model_config", None)
+        mm_config = getattr(model_config, "multimodal_config", None)
+        media_io_kwargs = getattr(mm_config, "media_io_kwargs", None)
+        if not isinstance(media_io_kwargs, dict):
+            media_io_kwargs = None
+        allowed_local_media_path = getattr(
+            model_config, "allowed_local_media_path", ""
+        )
+        if not isinstance(allowed_local_media_path, str):
+            allowed_local_media_path = ""
+        allowed_media_domains = getattr(model_config, "allowed_media_domains", None)
+        if not isinstance(allowed_media_domains, list):
+            allowed_media_domains = None
+
+        self.media_connector = MediaConnector(
+            media_io_kwargs=media_io_kwargs,
+            allowed_local_media_path=allowed_local_media_path,
+            allowed_media_domains=allowed_media_domains,
+        )
+
     def parse_data(self, data: object) -> OCRInput | list[OCRInput]:
         if isinstance(data, Mapping):
             if "image" in data:
                 return self.parse_data(data["image"])
             if "images" in data:
                 return self.parse_data(data["images"])
+            if "image_url" in data:
+                image_url = data["image_url"]
+                if isinstance(image_url, Mapping):
+                    image_url = image_url.get("url")
+                return self.parse_data(image_url)
+            if "url" in data:
+                return self.parse_data(data["url"])
             raise TypeError(
-                "Nemotron OCR request dictionaries must contain `image` or `images`."
+                "Nemotron OCR request dictionaries must contain `image`, "
+                "`images`, or `image_url`."
             )
 
         if isinstance(data, Sequence) and not isinstance(
@@ -47,7 +86,14 @@ class NemotronOCRV2IOProcessor(IOProcessor[OCRInput | list[OCRInput], Any]):
             with Image.open(BytesIO(data)) as image:
                 return image.convert("RGB")
         if isinstance(data, (str, Path)):
-            path = Path(data).expanduser().resolve()
+            data_str = str(data)
+            if data_str.lower().startswith(_URL_PREFIXES):
+                fetched = self.media_connector.fetch_image(data_str)
+                if isinstance(fetched, MediaWithBytes):
+                    fetched = fetched.media
+                return fetched.convert("RGB")
+
+            path = Path(data_str).expanduser().resolve()
             if not path.is_file():
                 raise FileNotFoundError(
                     f"Nemotron OCR image path does not exist: {path}"

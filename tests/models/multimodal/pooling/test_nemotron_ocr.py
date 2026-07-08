@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import base64
 import json
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
@@ -17,7 +20,9 @@ from vllm.model_executor.models.nemotron_ocr import (
     tensor_to_json,
 )
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
+from vllm.plugins.io_processors import get_io_processor
 from vllm.plugins.io_processors.nemotron_ocr import NemotronOCRV2IOProcessor
+from vllm.renderers import BaseRenderer
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.nemotron_ocr import NemotronOCRV2Config
 
@@ -117,6 +122,35 @@ def test_nemotron_ocr_model_loader_does_not_consume_hf_weight_iterator():
 
     assert model.load_weights(raise_if_iterated()) == set()
     assert model.get_language_model() is model
+
+
+def test_nemotron_ocr_io_processor_is_builtin_without_entry_point():
+    vllm_config = MagicMock()
+    renderer = MagicMock(spec=BaseRenderer)
+
+    with patch("importlib.metadata.entry_points", return_value=[]):
+        processor = get_io_processor(
+            vllm_config,
+            renderer=renderer,
+            plugin_from_init="nemotron_ocr_v2",
+        )
+
+    assert isinstance(processor, NemotronOCRV2IOProcessor)
+
+
+def test_nemotron_ocr_io_processor_accepts_image_url_data_uri():
+    image = Image.new("RGB", (4, 3), color="white")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    image_url = "data:image/png;base64," + base64.b64encode(
+        buffer.getvalue()
+    ).decode()
+    processor = NemotronOCRV2IOProcessor(vllm_config=None, renderer=None)
+
+    parsed = processor.parse_data({"image_url": {"url": image_url}})
+
+    assert isinstance(parsed, Image.Image)
+    assert parsed.size == (4, 3)
 
 
 def test_nemotron_ocr_io_processor_round_trip(tmp_path: Path):

@@ -35,6 +35,16 @@ def parse_args():
     parser.add_argument("--image-dir", type=Path)
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--request-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Number of prompts per LLM.encode call for the vLLM backend. "
+            "Set 0 to submit all timed prompts in one call and let the "
+            "engine schedule up to --batch-size requests at a time."
+        ),
+    )
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--merge-level", default="paragraph")
     parser.add_argument("--output-json", type=Path)
@@ -179,6 +189,10 @@ def list_images(image_dir: Path, limit: int) -> list[Path]:
 
 
 def batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
+    if batch_size <= 0:
+        yield items
+        return
+
     for start in range(0, len(items), batch_size):
         yield items[start : start + batch_size]
 
@@ -213,7 +227,8 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
 
     def prompts_for(batch: list[Path]):
         if not args.disable_io_processor:
-            return [{"data": str(path)} for path in batch]
+            images = [str(path) for path in batch]
+            return {"data": {"images": images} if len(images) != 1 else images[0]}
         return [
             {
                 "prompt_token_ids": [1],
@@ -233,7 +248,8 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
 
     timed = images[: args.limit]
     start = time.perf_counter()
-    for batch in batches(timed, args.batch_size):
+    request_batch_size = args.request_batch_size or len(timed)
+    for batch in batches(timed, request_batch_size):
         llm.encode(
             prompts_for(batch),
             pooling_task="plugin",
@@ -241,7 +257,13 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
         )
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
-    return {"backend": "vllm", "count": len(timed), "elapsed_s": elapsed}
+    return {
+        "backend": "vllm",
+        "count": len(timed),
+        "elapsed_s": elapsed,
+        "request_batch_size": request_batch_size,
+        "max_num_seqs": args.batch_size,
+    }
 
 
 def run_direct_backend(args, images: list[Path]) -> dict[str, Any]:
