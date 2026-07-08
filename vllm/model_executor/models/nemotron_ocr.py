@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from io import BytesIO
 from pathlib import Path
@@ -50,6 +52,18 @@ _CHECKPOINT_FILES = (
     "model_config.json",
 )
 _MAX_OUTPUT_BYTES = 1024 * 1024
+
+
+def _enable_ocr_profile_logging() -> None:
+    logger = logging.getLogger("nemotron_ocr.inference.pipeline_v2")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(
+            logging.Formatter("%(levelname)s:%(name)s:%(message)s")
+        )
+        logger.addHandler(handler)
+    logger.propagate = False
 
 
 def _json_to_tensor(payload: Any, *, device: torch.device) -> torch.Tensor:
@@ -305,6 +319,7 @@ class NemotronOCRV2ForImageToText(nn.Module, IsAttentionFree, SupportsMultiModal
             hf_config, "nemotron_ocr_relational_chunk_size", 128
         )
         self.infer_length = getattr(hf_config, "nemotron_ocr_infer_length", None)
+        self.verbose_post = getattr(hf_config, "nemotron_ocr_verbose_post", False)
 
     def embed_input_ids(
         self,
@@ -363,11 +378,8 @@ class NemotronOCRV2ForImageToText(nn.Module, IsAttentionFree, SupportsMultiModal
             return self._ocr
 
         source_dir = os.environ.get("NEMOTRON_OCR_SOURCE")
-        if source_dir:
-            import sys
-
-            if source_dir not in sys.path:
-                sys.path.insert(0, source_dir)
+        if source_dir and source_dir not in sys.path:
+            sys.path.insert(0, source_dir)
 
         try:
             from nemotron_ocr.inference.pipeline_v2 import NemotronOCRV2
@@ -379,10 +391,14 @@ class NemotronOCRV2ForImageToText(nn.Module, IsAttentionFree, SupportsMultiModal
                 "`NEMOTRON_OCR_SOURCE` to its `nemotron-ocr/src` directory."
             ) from exc
 
+        if self.verbose_post:
+            _enable_ocr_profile_logging()
+
         kwargs: dict[str, Any] = {
             "detector_max_batch_size": self.detector_max_batch_size,
             "recognizer_chunk_size": self.recognizer_chunk_size,
             "relational_chunk_size": self.relational_chunk_size,
+            "verbose_post": self.verbose_post,
         }
         if self.infer_length is not None:
             kwargs["infer_length"] = self.infer_length

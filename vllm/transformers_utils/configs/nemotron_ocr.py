@@ -22,6 +22,7 @@ class NemotronOCRV2Config(PretrainedConfig):
         nemotron_ocr_recognizer_chunk_size: int = 128,
         nemotron_ocr_relational_chunk_size: int = 128,
         nemotron_ocr_infer_length: int | None = None,
+        nemotron_ocr_verbose_post: bool = False,
         io_processor_plugin: str = "nemotron_ocr_v2",
         **kwargs: Any,
     ):
@@ -40,4 +41,5 @@ class NemotronOCRV2Config(PretrainedConfig):
         self.nemotron_ocr_recognizer_chunk_size = nemotron_ocr_recognizer_chunk_size
         self.nemotron_ocr_relational_chunk_size = nemotron_ocr_relational_chunk_size
         self.nemotron_ocr_infer_length = nemotron_ocr_infer_length
+        self.nemotron_ocr_verbose_post = nemotron_ocr_verbose_post
         self.io_processor_plugin = io_processor_plugin

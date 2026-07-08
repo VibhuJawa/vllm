@@ -34,6 +34,12 @@ def parse_args():
     parser.add_argument("--model-subdir", default="v2_multilingual")
     parser.add_argument("--image-dir", type=Path)
     parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument(
+        "--image-offset",
+        type=int,
+        default=0,
+        help="Skip this many sorted images before applying --limit.",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument(
         "--request-batch-size",
@@ -47,11 +53,33 @@ def parse_args():
     )
     parser.add_argument("--warmup", type=int, default=8)
     parser.add_argument("--merge-level", default="paragraph")
+    parser.add_argument(
+        "--infer-length",
+        type=int,
+        help="Override the OCR detector input resolution.",
+    )
+    parser.add_argument(
+        "--profile-ocr",
+        action="store_true",
+        help=(
+            "Enable Nemotron OCR per-phase timing logs. This adds CUDA "
+            "synchronization and should not be used for throughput numbers."
+        ),
+    )
     parser.add_argument("--output-json", type=Path)
     parser.add_argument(
         "--disable-io-processor",
         action="store_true",
         help="Use raw multimodal prompts instead of the IO processor plugin.",
+    )
+    parser.add_argument(
+        "--plugin-prompt-mode",
+        choices=["independent", "bundled"],
+        default="independent",
+        help=(
+            "For the IO processor path, submit each image as its own plugin "
+            "request or bundle a batch of images inside one plugin request."
+        ),
     )
 
     parser.add_argument("--prepare-safedocs", action="store_true")
@@ -177,15 +205,22 @@ def prepare_safedocs(args) -> Path:
     return image_dir
 
 
-def list_images(image_dir: Path, limit: int) -> list[Path]:
+def list_images(image_dir: Path, *, limit: int, offset: int) -> list[Path]:
+    if offset < 0:
+        raise ValueError("--image-offset must be non-negative.")
+
     images = [
         path
         for path in sorted(image_dir.expanduser().resolve().iterdir())
         if path.suffix.lower() in IMAGE_SUFFIXES
     ]
-    if len(images) < limit:
-        raise RuntimeError(f"Found {len(images)} images in {image_dir}; need {limit}.")
-    return images[:limit]
+    needed = offset + limit
+    if len(images) < needed:
+        raise RuntimeError(
+            f"Found {len(images)} images in {image_dir}; need {needed} "
+            f"for offset {offset} and limit {limit}."
+        )
+    return images[offset:needed]
 
 
 def batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
@@ -198,7 +233,7 @@ def batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
 
 
 def hf_overrides(args, *, use_io_processor: bool = True) -> dict[str, Any]:
-    return {
+    overrides = {
         "model_type": "nemotron_ocr_v2",
         "architectures": ["NemotronOCRV2ForImageToText"],
         "nemotron_ocr_model_subdir": args.model_subdir,
@@ -206,8 +241,12 @@ def hf_overrides(args, *, use_io_processor: bool = True) -> dict[str, Any]:
         "nemotron_ocr_detector_max_batch_size": args.detector_max_batch_size,
         "nemotron_ocr_recognizer_chunk_size": args.recognizer_chunk_size,
         "nemotron_ocr_relational_chunk_size": args.relational_chunk_size,
+        "nemotron_ocr_verbose_post": args.profile_ocr,
         "io_processor_plugin": "nemotron_ocr_v2" if use_io_processor else None,
     }
+    if args.infer_length is not None:
+        overrides["nemotron_ocr_infer_length"] = args.infer_length
+    return overrides
 
 
 def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
@@ -228,6 +267,8 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
     def prompts_for(batch: list[Path]):
         if not args.disable_io_processor:
             images = [str(path) for path in batch]
+            if args.plugin_prompt_mode == "independent":
+                return [{"data": image} for image in images]
             return {"data": {"images": images} if len(images) != 1 else images[0]}
         return [
             {
@@ -263,6 +304,7 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
         "elapsed_s": elapsed,
         "request_batch_size": request_batch_size,
         "max_num_seqs": args.batch_size,
+        "plugin_prompt_mode": args.plugin_prompt_mode,
     }
 
 
@@ -315,7 +357,7 @@ def main():
     if image_dir is None:
         raise ValueError("Pass --image-dir or --prepare-safedocs.")
 
-    images = list_images(image_dir, args.limit)
+    images = list_images(image_dir, limit=args.limit, offset=args.image_offset)
     if args.backend == "vllm":
         result = run_vllm_backend(args, images)
     else:
@@ -326,6 +368,9 @@ def main():
             "model": args.model,
             "model_subdir": args.model_subdir,
             "batch_size": args.batch_size,
+            "image_offset": args.image_offset,
+            "infer_length": args.infer_length,
+            "profile_ocr": args.profile_ocr,
             "images_per_second": result["count"] / result["elapsed_s"],
             "ms_per_image": result["elapsed_s"] * 1000 / result["count"],
         }

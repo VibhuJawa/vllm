@@ -6,10 +6,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vllm.config import VllmConfig
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.pooling.io_processor import PluginWithIOProcessorPlugins
+from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
 from vllm.inputs import PromptType
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.plugins.io_processors.interface import IOProcessor
+from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 
 
@@ -96,3 +100,131 @@ def test_loading_plugin_from_model_config(my_plugin_entry_points):
     result = get_io_processor(vllm_config, renderer=renderer)
 
     assert isinstance(result, DummyIOProcessor)
+
+
+def test_offline_plugin_supports_batched_data_prompts(monkeypatch):
+    class EchoIOProcessor:
+        def parse_data(self, data):
+            return data
+
+        def pre_process(self, prompt, request_id=None, **kwargs):
+            prompts = prompt if isinstance(prompt, list) else [prompt]
+            return [{"prompt_token_ids": [1], "multi_modal_data": {"image": item}}
+                    for item in prompts]
+
+        def merge_pooling_params(self, params=None):
+            params = params or PoolingParams()
+            params.task = "plugin"
+            return params
+
+        def post_process(self, model_output, request_id=None, **kwargs):
+            return [output.request_id for output in model_output]
+
+    monkeypatch.setattr(
+        PoolingIOProcessor,
+        "pre_process_offline",
+        lambda self, ctx: ctx.prompts,
+    )
+
+    processor = object.__new__(PluginWithIOProcessorPlugins)
+    processor.io_processor = EchoIOProcessor()
+
+    ctx = OfflineInputsContext(
+        prompts=[{"data": "a"}, {"data": "b"}],
+        pooling_params=PoolingParams(),
+    )
+
+    engine_inputs = processor.pre_process_offline(ctx)
+
+    assert list(engine_inputs) == [
+        {"prompt_token_ids": [1], "multi_modal_data": {"image": "a"}},
+        {"prompt_token_ids": [1], "multi_modal_data": {"image": "b"}},
+    ]
+    assert ctx.plugin_output_sizes == [1, 1]
+
+    outputs = [
+        PoolingRequestOutput(
+            request_id="0",
+            outputs=MagicMock(),
+            prompt_token_ids=[],
+            num_cached_tokens=0,
+            finished=True,
+        ),
+        PoolingRequestOutput(
+            request_id="1",
+            outputs=MagicMock(),
+            prompt_token_ids=[],
+            num_cached_tokens=0,
+            finished=True,
+        ),
+    ]
+    processed = processor.post_process_offline(
+        OfflineOutputsContext(
+            outputs=outputs,
+            plugin_output_sizes=ctx.plugin_output_sizes,
+        )
+    )
+
+    assert [item.outputs for item in processed] == [["0"], ["1"]]
+
+
+def test_offline_plugin_preserves_single_prompt_expansion(monkeypatch):
+    class EchoIOProcessor:
+        def parse_data(self, data):
+            return data
+
+        def pre_process(self, prompt, request_id=None, **kwargs):
+            return [{"prompt_token_ids": [1], "multi_modal_data": {"image": item}}
+                    for item in prompt]
+
+        def merge_pooling_params(self, params=None):
+            params = params or PoolingParams()
+            params.task = "plugin"
+            return params
+
+        def post_process(self, model_output, request_id=None, **kwargs):
+            return [output.request_id for output in model_output]
+
+    monkeypatch.setattr(
+        PoolingIOProcessor,
+        "pre_process_offline",
+        lambda self, ctx: ctx.prompts,
+    )
+
+    processor = object.__new__(PluginWithIOProcessorPlugins)
+    processor.io_processor = EchoIOProcessor()
+
+    ctx = OfflineInputsContext(
+        prompts={"data": ["a", "b"]},
+        pooling_params=PoolingParams(),
+    )
+
+    processor.pre_process_offline(ctx)
+
+    assert ctx.plugin_output_sizes == [2]
+
+    outputs = [
+        PoolingRequestOutput(
+            request_id="0",
+            outputs=MagicMock(),
+            prompt_token_ids=[],
+            num_cached_tokens=0,
+            finished=True,
+        ),
+        PoolingRequestOutput(
+            request_id="1",
+            outputs=MagicMock(),
+            prompt_token_ids=[],
+            num_cached_tokens=0,
+            finished=True,
+        ),
+    ]
+    processed = processor.post_process_offline(
+        OfflineOutputsContext(
+            outputs=outputs,
+            plugin_output_sizes=ctx.plugin_output_sizes,
+        )
+    )
+
+    assert len(processed) == 1
+    assert processed[0].outputs == ["0", "1"]
