@@ -15,6 +15,27 @@ vLLM plugin baseline.
     128 reached 69.5380 images/s and remains the conservative accuracy profile.
     Do not describe rec64 as accuracy-preserving without a labeled evaluation.
 
+## Isolated model-patch contribution
+
+The external model changes were also tested without vLLM to separate their
+direct effect from the deployment-level queueing and replica gains. Three
+isolated 10,000-image Hugging Face in-process repetitions were run per
+condition on the same A100, with identical input order and OCR settings.
+
+Clean upstream pooled at **31.0416 images/s** and model PR #8 pooled at
+**31.6150 images/s**, a **1.847% model-only uplift**. All three paired runs
+were positive (+2.11%, +1.76%, and +1.67%); the paired 95% small-sample
+interval was +1.28% to +2.42%.
+
+![Isolated model PR #8 Hugging Face A/B](../assets/benchmarking/nemotron_ocr_v2_a100/model_pr8_hf_ab.png)
+
+[Vector version](../assets/benchmarking/nemotron_ocr_v2_a100/model_pr8_hf_ab.svg) ·
+[raw results, GPU traces, statistics, and protocol](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-09-model-pr8-ab)
+
+This is the speedup attributable to the model patch under direct Hugging Face
+execution. The 2.24x result below is the complete optimized serving stack and
+must not be attributed to the model PR alone.
+
 ## Matched 30K result
 
 ![Matched 30K Nemotron OCR v2 throughput](../assets/benchmarking/nemotron_ocr_v2_a100/matched_30k_speedup.png)

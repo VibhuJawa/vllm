@@ -15,6 +15,16 @@ at commit
 The checked-in patch remains the immutable copy used by this benchmark, so the
 result can be reproduced even before that PR is merged.
 
+The model patch's direct Hugging Face contribution was also measured in
+isolation: three matched 10,000-image repetitions per condition reached
+**31.0416 images/s** for clean upstream and **31.6150 images/s** for PR #8,
+a **1.847% model-only uplift**. Every paired repetition was positive; the
+paired 95% small-sample interval was 1.28% to 2.42%. The complete protocol,
+raw JSON/CSV traces, statistics, and chart are in the
+[`model-pr8-ab` result bundle](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-09-model-pr8-ab).
+This result must not be confused with the 2.24x end-to-end optimized vLLM
+deployment result, which includes queueing and replica-level gains.
+
 The matched A100 results, raw JSON/CSV telemetry, exact 1,000-page input
 manifest, and final charts are published in
 [`VibhuJawa/nemotron-vllm-ocr`](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-08).
