@@ -102,5 +102,5 @@
     "verdict": "no_output_regression_detected",
     "scope": "Output agreement against repeated controls; not labeled-ground-truth OCR accuracy."
   },
-  "artifact_bundle": "https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/results/final-85-imgs/results/a100-2026-07-09-final-85-imgs"
+  "artifact_bundle": "https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-09-final-85-imgs"
 }

@@ -243,4 +243,4 @@ committed as `a92d75050f05c2638394e970bf8cec53c113d99b` and pushed to
 
 The exact summaries, raw GPU traces, baseline sweep ranking, compact accuracy
 evidence, and matching charts are published in
-[`VibhuJawa/nemotron-vllm-ocr`](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/results/final-85-imgs/results/a100-2026-07-09-final-85-imgs).
+[`VibhuJawa/nemotron-vllm-ocr`](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-09-final-85-imgs).

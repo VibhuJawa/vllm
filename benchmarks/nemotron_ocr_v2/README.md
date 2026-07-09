@@ -157,7 +157,7 @@ vllm bench sweep serve \
 The final multi-replica sweep adds replica count, per-replica MPS share, OCR
 chunk sizes, and endpoint concurrency. Its exact harness, configs, resolved
 commands, source snapshots, raw summaries, and traces are archived in the
-[`final 85 images/s result bundle`](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/results/final-85-imgs/results/a100-2026-07-09-final-85-imgs).
+[`final 85 images/s result bundle`](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-09-final-85-imgs).
 
 The selected clean vLLM control is one replica with detector batch 16, four
 renderer workers, `max_num_seqs=64`, and concurrency 128. The selected optimized
