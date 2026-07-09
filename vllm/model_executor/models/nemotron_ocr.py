@@ -100,6 +100,39 @@ def tensor_to_json(data: torch.Tensor) -> Any:
     return orjson.loads(raw)
 
 
+def _trim_encoded_payload_rows(
+    rows: torch.Tensor,
+    num_rows: int,
+) -> list[torch.Tensor]:
+    """Return zero-copy row views containing only their encoded payloads."""
+    if rows.shape[1] < 4:
+        raise ValueError("Nemotron OCR output tensor is too short.")
+
+    # Read every four-byte length prefix in one small host transfer. The
+    # returned slices remain views on the original device, so the generic
+    # pooling output copy transfers only the declared payload bytes.
+    headers = (
+        rows[:num_rows, :4]
+        .detach()
+        .to(
+            device="cpu",
+            copy=True,
+            memory_format=torch.contiguous_format,
+        )
+        .numpy()
+    )
+    outputs = []
+    for index, header in enumerate(headers):
+        encoded_size = 4 + int.from_bytes(header, "little")
+        if encoded_size > rows.shape[1]:
+            raise ValueError(
+                "Nemotron OCR output tensor declares a payload larger than "
+                "its storage."
+            )
+        outputs.append(rows[index, :encoded_size])
+    return outputs
+
+
 def _image_to_chw_uint8(image: Any) -> torch.Tensor:
     if isinstance(image, torch.Tensor):
         tensor = image.detach().cpu()
@@ -279,9 +312,10 @@ class NemotronOCRV2PayloadPooler(Pooler):
         num_requests = len(pooling_metadata.prompt_lens)
         if hidden_states.dtype == torch.uint8 and hidden_states.ndim == 2:
             if hidden_states.shape[0] >= num_requests:
-                return [hidden_states[index] for index in range(num_requests)]
+                return _trim_encoded_payload_rows(hidden_states, num_requests)
             if hidden_states.shape[0] == 1:
-                return [hidden_states[0] for _ in range(num_requests)]
+                output = _trim_encoded_payload_rows(hidden_states, 1)[0]
+                return [output for _ in range(num_requests)]
 
         return [
             torch.zeros(4, dtype=torch.uint8, device=hidden_states.device)

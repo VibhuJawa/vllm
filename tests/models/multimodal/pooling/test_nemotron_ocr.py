@@ -17,6 +17,7 @@ from vllm.config.model import ModelConfig
 from vllm.model_executor.models.nemotron_ocr import (
     NemotronOCRV2ForImageToText,
     _image_to_chw_uint8,
+    _json_to_bytes,
     _json_to_tensor,
     tensor_to_json,
 )
@@ -132,6 +133,9 @@ def test_nemotron_ocr_batched_payload_codec_handles_padding_and_unicode():
 
     assert encoded.ndim == 2
     assert encoded.shape[0] == len(payloads)
+    assert encoded.device.type == "cpu"
+    assert encoded.dtype == torch.uint8
+    assert encoded.is_contiguous()
     assert [tensor_to_json(row) for row in encoded] == [
         {
             "regions": [
@@ -157,6 +161,50 @@ def test_nemotron_ocr_batched_payload_codec_rejects_oversize_payload():
             [{"text": "x" * (1024 * 1024 + 1)}],
             torch.device("cpu"),
         )
+
+
+def test_nemotron_ocr_pooler_returns_compact_payload_views():
+    model_config = SimpleNamespace(
+        model="nvidia/nemotron-ocr-v2",
+        revision=None,
+        hf_config=NemotronOCRV2Config(),
+    )
+    model = NemotronOCRV2ForImageToText(
+        SimpleNamespace(model_config=model_config),
+    )
+    payloads = [
+        {"regions": [{"text": "short"}]},
+        {"regions": [{"text": "a substantially longer payload"}]},
+    ]
+    encoded = model._encode_payloads(payloads, torch.device("cpu"))
+    pooling_metadata = SimpleNamespace(prompt_lens=torch.tensor([1, 1]))
+
+    outputs = model.pooler(encoded, pooling_metadata)
+
+    assert [output.numel() for output in outputs] == [
+        len(_json_to_bytes(payload)) for payload in payloads
+    ]
+    assert [tensor_to_json(output) for output in outputs] == payloads
+    assert all(output.device == encoded.device for output in outputs)
+    assert all(
+        output.untyped_storage().data_ptr() == encoded.data_ptr() for output in outputs
+    )
+
+
+def test_nemotron_ocr_pooler_rejects_truncated_payload():
+    model_config = SimpleNamespace(
+        model="nvidia/nemotron-ocr-v2",
+        revision=None,
+        hf_config=NemotronOCRV2Config(),
+    )
+    model = NemotronOCRV2ForImageToText(
+        SimpleNamespace(model_config=model_config),
+    )
+    truncated = torch.tensor([[8, 0, 0, 0, 1]], dtype=torch.uint8)
+    pooling_metadata = SimpleNamespace(prompt_lens=torch.tensor([1]))
+
+    with pytest.raises(ValueError, match="larger than its storage"):
+        model.pooler(truncated, pooling_metadata)
 
 
 def test_nemotron_ocr_model_loader_does_not_consume_hf_weight_iterator():

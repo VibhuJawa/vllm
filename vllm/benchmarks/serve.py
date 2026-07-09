@@ -66,6 +66,88 @@ def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
     return {**(base or {}), **(override or {})}
 
 
+def _make_request_func_input(
+    request: SampleRequest,
+    *,
+    model_id: str,
+    model_name: str | None,
+    api_url: str,
+    logprobs: int | None,
+    ignore_eos: bool,
+    extra_headers: dict | None,
+    extra_body: dict | None,
+) -> RequestFuncInput:
+    """Translate one dataset sample into the corresponding endpoint request."""
+    mm_content = request.multi_modal_data
+    if not (
+        mm_content is None
+        or isinstance(mm_content, dict)
+        or (
+            isinstance(mm_content, list)
+            and all(isinstance(item, dict) for item in mm_content)
+        )
+    ):
+        raise TypeError("multi_modal_data must be a dict or list[dict]")
+
+    return RequestFuncInput(
+        model=model_id,
+        model_name=model_name,
+        prompt=request.prompt,
+        api_url=api_url,
+        prompt_len=request.prompt_len,
+        output_len=request.expected_output_len or 0,
+        logprobs=logprobs,
+        multi_modal_content=mm_content,
+        ignore_eos=ignore_eos,
+        extra_headers=extra_headers,
+        extra_body=_merge_overrides(extra_body, request.request_overrides),
+        request_id=request.request_id,
+        chat_messages=request.chat_messages,
+    )
+
+
+def _partition_setup_requests(
+    requests: list[SampleRequest],
+    *,
+    num_setup_requests: int,
+    num_timed_requests: int,
+) -> tuple[list[SampleRequest] | None, list[SampleRequest]]:
+    """Hold setup request entries out of the measured request set."""
+    if num_setup_requests == 0:
+        return None, requests
+
+    required = num_setup_requests + max(num_timed_requests, 0)
+    if len(requests) < required:
+        raise ValueError(
+            f"Dataset produced {len(requests)} requests, but {required} are "
+            "required to keep setup requests out of the timed workload. "
+            "Provide more samples or allow oversampling."
+        )
+
+    if num_timed_requests > 0:
+        timed_requests = requests[:num_timed_requests]
+        setup_requests = requests[
+            num_timed_requests : num_timed_requests + num_setup_requests
+        ]
+    else:
+        setup_requests = requests[-num_setup_requests:]
+        timed_requests = requests[:-num_setup_requests]
+    return setup_requests, timed_requests
+
+
+def _validate_tokenizerless_benchmark(
+    tokenizer: TokenizerLike | None,
+    *,
+    dataset_name: str,
+    backend: str,
+) -> None:
+    if tokenizer is None and (dataset_name != "custom" or backend != "vllm-pooling"):
+        raise ValueError(
+            "--skip-tokenizer-init is supported only with "
+            "--dataset-name custom and --backend vllm-pooling."
+        )
+
+
 TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) and (
     shutil.which("gnuplot") is not None
 )
@@ -771,7 +853,7 @@ async def benchmark(
     api_url: str,
     base_url: str,
     model_id: str,
-    model_name: str,
+    model_name: str | None,
     tokenizer: TokenizerLike | None,
     input_requests: list[SampleRequest],
     logprobs: int | None,
@@ -795,11 +877,34 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    warmup_input_requests: list[SampleRequest] | None = None,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     except KeyError:
         raise ValueError(f"Unknown backend: {endpoint_type}") from None
+
+    if (num_warmups > 0 or ready_check_timeout_sec > 0) and not warmup_input_requests:
+        raise ValueError(
+            "Ready checks and warmups require dedicated setup requests that "
+            "are excluded from the timed workload."
+        )
+    setup_requests = (
+        warmup_input_requests if warmup_input_requests is not None else input_requests
+    )
+    if not setup_requests:
+        raise ValueError("At least one benchmark request is required.")
+
+    test_input = _make_request_func_input(
+        setup_requests[0],
+        model_id=model_id,
+        model_name=model_name,
+        api_url=api_url,
+        logprobs=logprobs,
+        ignore_eos=ignore_eos,
+        extra_headers=extra_headers,
+        extra_body=extra_body,
+    )
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     # Use ssl_context if provided, otherwise default to True for https URLs
@@ -822,38 +927,6 @@ async def benchmark(
     )
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-        input_requests[0].prompt,
-        input_requests[0].prompt_len,
-        input_requests[0].expected_output_len,
-        input_requests[0].multi_modal_data,
-    )
-    test_extra_body = _merge_overrides(extra_body, input_requests[0].request_overrides)
-    test_chat_messages = input_requests[0].chat_messages
-
-    assert (
-        test_mm_content is None
-        or isinstance(test_mm_content, dict)
-        or (
-            isinstance(test_mm_content, list)
-            and all(isinstance(item, dict) for item in test_mm_content)
-        )
-    ), "multi_modal_data must be a dict or list[dict]"
-    test_input = RequestFuncInput(
-        model=model_id,
-        model_name=model_name,
-        prompt=test_prompt,
-        api_url=api_url,
-        prompt_len=test_prompt_len,
-        output_len=test_output_len,
-        logprobs=logprobs,
-        multi_modal_content=test_mm_content,
-        ignore_eos=ignore_eos,
-        extra_headers=extra_headers,
-        extra_body=test_extra_body,
-        chat_messages=test_chat_messages,
-    )
-
     if ready_check_timeout_sec > 0:
         test_output = await wait_for_endpoint(
             request_func,
@@ -862,6 +935,7 @@ async def benchmark(
             timeout_seconds=ready_check_timeout_sec,
         )
         if not test_output.success:
+            await session.close()
             raise ValueError(
                 "Initial test run failed - Please make sure benchmark "
                 "arguments are correctly specified. "
@@ -882,19 +956,44 @@ async def benchmark(
         )
         warmup_tasks = []
 
-        async def warmup_limited_request_func():
+        async def warmup_limited_request_func(
+            warmup_input: RequestFuncInput,
+        ) -> RequestFuncOutput:
             async with warmup_semaphore:
                 return await request_func(
-                    request_func_input=test_input, session=session, pbar=warmup_pbar
+                    request_func_input=warmup_input,
+                    session=session,
+                    pbar=warmup_pbar,
                 )
 
-        for _ in range(num_warmups):
-            request_task = asyncio.create_task(warmup_limited_request_func())
+        for warmup_index in range(num_warmups):
+            warmup_request = setup_requests[warmup_index % len(setup_requests)]
+            warmup_input = _make_request_func_input(
+                warmup_request,
+                model_id=model_id,
+                model_name=model_name,
+                api_url=api_url,
+                logprobs=logprobs,
+                ignore_eos=ignore_eos,
+                extra_headers=extra_headers,
+                extra_body=extra_body,
+            )
+            request_task = asyncio.create_task(
+                warmup_limited_request_func(warmup_input)
+            )
             warmup_tasks.append(request_task)
-        _ = await asyncio.gather(*warmup_tasks)
+        warmup_outputs = await asyncio.gather(*warmup_tasks)
 
         if warmup_pbar is not None:
             warmup_pbar.close()
+        warmup_errors = [
+            output.error for output in warmup_outputs if not output.success
+        ]
+        if warmup_errors:
+            await session.close()
+            raise ValueError(
+                f"Warmup requests failed (showing up to 10): {warmup_errors[:10]}"
+            )
         print("Warmup run completed.")
 
     print("Starting main benchmark run...")
@@ -918,20 +1017,7 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
-            extra_headers=extra_headers,
-            extra_body=test_extra_body,
-            chat_messages=test_chat_messages,
-        )
+        profile_input = replace(test_input, api_url=base_url + "/start_profile")
         profile_output = await request_func(
             request_func_input=profile_input, session=session
         )
@@ -1001,37 +1087,20 @@ async def benchmark(
                 for rps_val in range(last_int_rps + 1, current_int_rps + 1):
                     rps_change_events.append({"rps": rps_val, "timestamp": timestamp})
                 last_int_rps = current_int_rps
-        prompt, prompt_len, output_len, mm_content, request_id = (
-            request.prompt,
-            request.prompt_len,
-            request.expected_output_len,
-            request.multi_modal_data,
-            request.request_id,
-        )
-        per_request_extra_body = _merge_overrides(extra_body, request.request_overrides)
         req_model_id, req_model_name = model_id, model_name
         if lora_modules_iter:
             req_lora_module = next(lora_modules_iter)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
-        mm_content_typed: dict[str, Any] | list[dict[str, Any]] | None = None
-        if isinstance(mm_content, (dict, list)):
-            mm_content_typed = mm_content
-
-        request_func_input = RequestFuncInput(
-            model=req_model_id,
+        request_func_input = _make_request_func_input(
+            request,
+            model_id=req_model_id,
             model_name=req_model_name,
-            prompt=prompt,
             api_url=api_url,
-            prompt_len=prompt_len,
-            output_len=output_len or 0,
             logprobs=logprobs,
-            multi_modal_content=mm_content_typed,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
-            extra_body=per_request_extra_body,
-            request_id=request_id,
-            chat_messages=request.chat_messages,
+            extra_body=extra_body,
         )
         tasks.append(
             asyncio.create_task(
@@ -1352,14 +1421,7 @@ async def benchmark(
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
+        profile_input = replace(test_input, api_url=base_url + "/stop_profile")
         profile_output = await request_func(
             request_func_input=profile_input, session=session
         )
@@ -1625,7 +1687,10 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--num-warmups",
         type=int,
         default=0,
-        help="Number of warmup requests.",
+        help=(
+            "Number of warmup requests. Warmup samples are held out from the "
+            "timed workload; the dataset must supply enough additional samples."
+        ),
     )
     parser.add_argument(
         "--profile",
@@ -1974,6 +2039,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         model_name = args.served_model_name
         model_id = args.model
 
+    tokenizer: TokenizerLike | None
     if args.skip_tokenizer_init:
         tokenizer_id = None
         tokenizer_mode = None
@@ -2046,20 +2112,43 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         # for any non self-timed trace, this is False
         args.self_timed = False
 
-    # Load the dataset.
-    if tokenizer is None and (
-        args.dataset_name != "custom" or args.backend not in POOLING_BACKENDS
-    ):
-        raise ValueError(
-            "--skip-tokenizer-init is currently supported only with the "
-            "custom dataset and a pooling backend."
-        )
-    input_requests = get_samples(args, tokenizer)
+    if args.num_warmups < 0:
+        raise ValueError("--num-warmups must be non-negative.")
+
+    # Skipping client-side tokenization is useful for native pooling requests
+    # whose custom-dataset prompt is already a structured request body. Other
+    # protocols and datasets rely on the tokenizer to build valid inputs.
+    _validate_tokenizerless_benchmark(
+        tokenizer,
+        dataset_name=args.dataset_name,
+        backend=args.backend,
+    )
+
+    # A ready check executes the same endpoint request as a warmup. Reserve at
+    # least one setup entry when it is enabled so setup traffic does not reuse
+    # an entry from the timed set. Replayed payloads can still match by content;
+    # cache-sensitive benchmarks should use distinct data or disable the cache.
+    num_setup_requests = max(
+        args.num_warmups,
+        int(args.ready_check_timeout_sec > 0),
+    )
+    sample_args = args
+    if num_setup_requests and args.num_prompts > 0:
+        sample_args = argparse.Namespace(**vars(args))
+        sample_args.num_prompts = args.num_prompts + num_setup_requests
+
+    sampled_requests = get_samples(sample_args, tokenizer)
 
     if args.dataset_name in ("random", "prefix_repetition"):
-        input_requests = await _align_prompts_to_server_tokenizer(
-            base_url, model_id, input_requests, ssl_context
+        sampled_requests = await _align_prompts_to_server_tokenizer(
+            base_url, model_id, sampled_requests, ssl_context
         )
+
+    warmup_input_requests, input_requests = _partition_setup_requests(
+        sampled_requests,
+        num_setup_requests=num_setup_requests,
+        num_timed_requests=args.num_prompts,
+    )
 
     goodput_config_dict = check_goodput_args(args)
 
@@ -2139,6 +2228,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        warmup_input_requests=warmup_input_requests,
     )
 
     # Save config and results to json
