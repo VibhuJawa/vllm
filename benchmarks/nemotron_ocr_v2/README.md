@@ -1,53 +1,53 @@
-# Nemotron OCR v2 model optimization patch
+# Nemotron OCR v2 A100 benchmark kit
 
-The vLLM benchmark's optimized result requires the external model changes in
-`nemotron_ocr_model_optimizations.patch`. These changes are not part of the
-vLLM source tree.
+This directory contains the dataset builder and benchmark clients used for the
+matched `nvidia/nemotron-ocr-v2` Hugging Face and native vLLM comparison.
 
-The exact model repository base is
-`0e83e83f17943524b90afa6c0fd82ac2bc1a40ca` from
-`nvidia/nemotron-ocr-v2`.
+On one A100-SXM4-80GB, the final matched 30,000-image results were:
 
-The model-side changes are published for review in
-[`nvidia/nemotron-ocr-v2` PR #8](https://huggingface.co/nvidia/nemotron-ocr-v2/discussions/8)
-at commit
-[`bb392d4`](https://huggingface.co/nvidia/nemotron-ocr-v2/commit/bb392d494b616d3a1692c3dbe59f63c1d2a8a7fa).
-The checked-in patch remains the immutable copy used by this benchmark, so the
-result can be reproduced even before that PR is merged.
+| System | Images/s | Speedup versus clean vLLM |
+| --- | ---: | ---: |
+| Official NVIDIA/HF in-process | 31.2456869 | 0.692x |
+| Tuned clean-model vLLM | 45.1633991 | 1.000x |
+| Optimized native vLLM | **85.3941303** | **1.891x** |
 
-The model patch's direct Hugging Face contribution was also measured in
-isolation: three matched 10,000-image repetitions per condition reached
-**31.0416 images/s** for clean upstream and **31.6150 images/s** for PR #8,
-a **1.847% model-only uplift**. Every paired repetition was positive; the
-paired 95% small-sample interval was 1.28% to 2.42%. The complete protocol,
-raw JSON/CSV traces, statistics, and chart are in the
-[`model-pr8-ab` result bundle](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-09-model-pr8-ab).
-This result must not be confused with the 2.24x end-to-end optimized vLLM
-deployment result, which includes queueing and replica-level gains.
+All systems received the same 1,000 ordered real document pages as JPEG Q100,
+4:4:4 byte payloads and processed 30 replays. The native vLLM runs completed
+with zero failed requests. See the
+[full A100 report](../../docs/benchmarking/nemotron_ocr_v2_a100.md) for the
+matched contract, corrected baseline sweep, GPU traces, and output-agreement
+gate.
 
-The matched A100 results, raw JSON/CSV telemetry, exact 1,000-page input
-manifest, and final charts are published in
-[`VibhuJawa/nemotron-vllm-ocr`](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-08).
-The vLLM-native model/plugin and queueing changes live on
-[`VibhuJawa/vllm#1`](https://github.com/VibhuJawa/vllm/pull/1), pinned at
-[`267b6f6d6`](https://github.com/VibhuJawa/vllm/commit/267b6f6d6aecf5e33d82f549941f9ee486e29ab1);
-this directory carries the external model patch and reproducibility drivers
-needed to recreate the optimized deployment.
+## External model patch
 
-From the vLLM repository root, apply the patch to a clean model checkout:
+The optimized result requires model-side changes archived in
+`nemotron_ocr_model_optimizations.patch`; they are not part of the vLLM source
+tree. The patch applies to exact upstream model commit
+`0e83e83f17943524b90afa6c0fd82ac2bc1a40ca` and has SHA-256
+`19084526836ca882625383028e7273b0c4e3872315e458cf18eba788faed0cae`.
+The corresponding model PR commit is
+[`a92d75050`](https://huggingface.co/nvidia/nemotron-ocr-v2/commit/a92d75050f05c2638394e970bf8cec53c113d99b).
+
+The patch includes current-stream CUDA launches, synchronization reduction,
+batched relational geometry, and guarded exact detector fusions. It preserves
+eager fallbacks when a layout or module does not satisfy a fusion contract.
+It is also available for review in
+[`nvidia/nemotron-ocr-v2` discussion #8](https://huggingface.co/nvidia/nemotron-ocr-v2/discussions/8).
+
+Apply it to a clean model checkout:
 
 ```bash
 MODEL_REPO=/path/to/nemotron-ocr-v2
-git -C "$MODEL_REPO" checkout --detach 0e83e83f17943524b90afa6c0fd82ac2bc1a40ca
+git -C "$MODEL_REPO" checkout --detach \
+  0e83e83f17943524b90afa6c0fd82ac2bc1a40ca
 git -C "$MODEL_REPO" apply --check \
   "$(pwd)/benchmarks/nemotron_ocr_v2/nemotron_ocr_model_optimizations.patch"
 git -C "$MODEL_REPO" apply \
   "$(pwd)/benchmarks/nemotron_ocr_v2/nemotron_ocr_model_optimizations.patch"
 ```
 
-Rebuild the model extension for an A100 (`sm_80`) using the CUDA compiler that
-matches the PyTorch environment. The following is the exact layout used by the
-A100 benchmark environment; adjust `ROOT` only if the checkout was relocated:
+Rebuild the extension for A100 (`sm_80`) with the CUDA compiler matching the
+PyTorch environment:
 
 ```bash
 ROOT=/raid/vjawa/tmp/ocr_optimization
@@ -66,12 +66,12 @@ TORCH_CUDA_ARCH_LIST=8.0 \
 export NEMOTRON_OCR_SOURCE="$MODEL_REPO/nemotron-ocr/src"
 ```
 
-## Dataset creation
+## JPEG-byte dataset
 
 `build_pooling_dataset.py` converts a sorted directory of document images into
-vLLM custom-dataset JSONL. Each row contains one JPEG data URI under
-`prompt.data`. The exact 1,000-image Q100, 4:4:4 recipe used for the benchmark
-is Pillow quality `100` with subsampling `0`:
+vLLM custom-dataset JSONL. Each row carries one JPEG data URI in
+`prompt.data`. The publication workload used Pillow quality 100 with
+subsampling 0:
 
 ```bash
 python benchmarks/nemotron_ocr_v2/build_pooling_dataset.py \
@@ -84,57 +84,58 @@ python benchmarks/nemotron_ocr_v2/build_pooling_dataset.py \
   --workers 8
 ```
 
-## Reproducibility drivers
+The publication JSONL has SHA-256
+`139c96ef75a85da440350722a95d9eb3bd21dd4155d43f7281253f63c07eaa16`.
+Base64 and JPEG decoding remain inside the timed request path.
 
-`benchmark_hf_inprocess.py` runs `NemotronOCRV2` directly, without vLLM. It
-accepts either a vLLM custom-dataset JSONL file or a directory of JPEGs. JSONL
-JPEG payloads remain compressed bytes until the timed model pipeline, and
-`--replay-count` repeats the selected image set. The result records model Git
-provenance, input representation, failures through process exit, timing, peak
-memory, and optional predictions and `nvidia-smi` traces. An optimized checkout
-created by applying the patch above is intentionally dirty, so pass
-`--allow-dirty-model-repo`; its exact dirty status is still recorded.
+## Benchmark clients
+
+`benchmark_hf_inprocess.py` runs the official `NemotronOCRV2` pipeline directly,
+without vLLM. It accepts either the custom-dataset JSONL or a JPEG directory and
+supports replaying the selected corpus to keep the GPU under sustained load:
 
 ```bash
 python benchmarks/nemotron_ocr_v2/benchmark_hf_inprocess.py \
   --model-repo "$MODEL_REPO" \
   --dataset-jsonl /path/to/ocr_pooling.jsonl \
   --limit 1000 \
-  --replay-count 1 \
-  --batch-size 32 \
-  --allow-dirty-model-repo \
+  --replay-count 30 \
+  --batch-size 64 \
+  --warmup 128 \
+  --infer-length 1024 \
+  --detector-max-batch-size 32 \
+  --recognizer-chunk-size 128 \
+  --relational-chunk-size 128 \
   --gpu-trace-device 0 \
-  --gpu-trace-csv /path/to/results/hf_gpu_trace.csv \
-  --predictions-json /path/to/results/hf_predictions.json \
-  --output-json /path/to/results/hf_summary.json
+  --gpu-trace-csv /path/to/results/gpu_trace.csv \
+  --output-json /path/to/results/result.json
 ```
 
-`benchmark_multi_endpoint_pooling.py` drives a work-conserving client queue
-across already-running native vLLM `/pooling` endpoints. It reads the same
-custom-dataset JSONL request bodies, requires `--num-prompts` to equal the row
-count times `--replay-count`, traces the explicitly selected physical GPU, and
-writes endpoint-level completion/latency data plus aggregate failures and GPU
-metrics. It exits nonzero if any timed request fails.
+`benchmark_multi_endpoint_pooling.py` drives one work-conserving client queue
+across already-running native vLLM `/pooling` endpoints. It validates the replay
+count, traces the selected physical GPU, records endpoint-level latency and
+completion, and exits nonzero if any timed request fails:
 
 ```bash
 python benchmarks/nemotron_ocr_v2/benchmark_multi_endpoint_pooling.py \
   --endpoint http://127.0.0.1:8000 \
   --endpoint http://127.0.0.1:8001 \
   --dataset /path/to/ocr_pooling.jsonl \
-  --model nvidia/nemotron-ocr-v2 \
-  --num-prompts 2000 \
-  --replay-count 2 \
+  --model /path/to/nemotron-ocr-v2 \
+  --num-prompts 30000 \
+  --replay-count 30 \
+  --concurrency-per-endpoint 64 \
+  --warmups-per-endpoint 32 \
   --gpu 0 \
   --output-dir /path/to/results/multi_endpoint
 ```
 
-## vLLM-native parameter sweeps
+## Native vLLM setting sweeps
 
-The included `serve_sweep.json` and `bench_sweep.json` plug directly into
-`vllm bench sweep serve`. They sweep `max_num_seqs`, renderer workers, and
-client concurrency while native `AsyncLLM` owns admission and continuous
-batching inside the `/pooling` server. Use `--dry-run` first to inspect the
-Cartesian product and substitute your model and dataset paths:
+`serve_sweep.json` and `bench_sweep.json` plug into
+`vllm bench sweep serve`. Native `AsyncLLM` owns admission and continuous
+batching while the sweep varies server and client settings. Use `--dry-run`
+first to inspect the Cartesian product:
 
 ```bash
 MODEL=/path/to/nemotron-ocr-v2
@@ -152,3 +153,14 @@ vllm bench sweep serve \
   --after-bench-cmd true \
   --dry-run
 ```
+
+The final multi-replica sweep adds replica count, per-replica MPS share, OCR
+chunk sizes, and endpoint concurrency. Its exact harness, configs, resolved
+commands, source snapshots, raw summaries, and traces are archived in the
+[`final 85 images/s result bundle`](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/results/final-85-imgs/results/a100-2026-07-09-final-85-imgs).
+
+The selected clean vLLM control is one replica with detector batch 16, four
+renderer workers, `max_num_seqs=64`, and concurrency 128. The selected optimized
+shape is eight MPS replicas with detector batch 16, four renderer workers,
+recognizer and relational chunks 128, `max_num_seqs=40`, and concurrency 64 per
+endpoint.

@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "benchmark_date": "2026-07-08",
+  "schema_version": 2,
+  "benchmark_date": "2026-07-09",
   "hardware": {
     "device": "NVIDIA A100-SXM4-80GB",
     "gpu_uuid": "GPU-242d3c90-db9c-a49e-e2b9-ddb0b36f1ba3"
@@ -18,10 +18,11 @@
   },
   "software": {
     "vllm_branch": "agent/nemotron-ocr-v2-port",
-    "vllm_base_commit": "62c2813a5af52bb2d60b1a2ee47bbfcf91280b9f",
+    "vllm_result_commit": "d5058677b204b0026c2ed87fd4a2d81317ab0f8c",
     "official_model_base_commit": "0e83e83f17943524b90afa6c0fd82ac2bc1a40ca",
+    "optimized_model_commit": "a92d75050f05c2638394e970bf8cec53c113d99b",
     "optimized_model_patch": "benchmarks/nemotron_ocr_v2/nemotron_ocr_model_optimizations.patch",
-    "optimized_external_model_patch_sha256": "4b4b0cdf512586e37f98be474ad3fbd3ba7ae81fe4fb9f08c398f08e4f974db6",
+    "optimized_model_patch_sha256": "19084526836ca882625383028e7273b0c4e3872315e458cf18eba788faed0cae",
     "optimized_extension_cuda_arch": "8.0",
     "dataset_builder": "benchmarks/nemotron_ocr_v2/build_pooling_dataset.py",
     "benchmark_drivers": [
@@ -36,9 +37,9 @@
   "runs": [
     {
       "id": "official_hf",
-      "label": "Official NVIDIA/HF in-process",
+      "label": "Official NVIDIA/HF in-process baseline",
       "completed": 30000,
-      "failed": 0,
+      "failed": null,
       "elapsed_s": 960.1325154192746,
       "images_per_second": 31.245686942389902,
       "result_path": "publication_runs/hf_official_inprocess_b64_d32_jpeg_q100_30k/result.json",
@@ -47,51 +48,59 @@
       "gpu_trace_sha256": "12bce0eed91f359b4195c2e4a3b3c8d372b35ae11099754a0eb126212c79cddd"
     },
     {
-      "id": "vllm_baseline_isolated",
-      "label": "Isolated vLLM baseline, one replica",
+      "id": "vllm_tuned_clean_baseline",
+      "label": "Tuned clean-model vLLM baseline",
       "completed": 30000,
       "failed": 0,
-      "elapsed_s": 683.4851636700332,
-      "images_per_second": 43.892686476049285,
-      "result_path": "publication_runs/vllm_baseline_isolated_jpeg_q100_30k/summary.json",
-      "result_sha256": "36a0efe973ec8cd9a3a1fab1b57f1655304a7dd82b61f20d2d2c3dd238362ddb",
-      "gpu_trace_path": "publication_runs/vllm_baseline_isolated_jpeg_q100_30k/gpu_trace.csv",
-      "gpu_trace_sha256": "976f21c62ae1907eaf686bff13d66dd251149106996319eaa9cdafbd003fce7f"
+      "elapsed_s": 664.2546966858208,
+      "images_per_second": 45.163399144454075,
+      "result_path": "native_vllm_clean_baseline_validation/clean-baseline-winner-30k/joint-d16-rw4-s64-c128/benchmark/summary.json",
+      "result_sha256": "3045455fb8727d6ded88ec8b6c33d03c20a8a660c151a26d02703be82b7d9ddf",
+      "gpu_trace_path": "native_vllm_clean_baseline_validation/clean-baseline-winner-30k/joint-d16-rw4-s64-c128/benchmark/gpu_trace.csv",
+      "gpu_trace_sha256": "6bc1641d94a5097f91c4a53bbc98286322675d75abf1ed30f24ba41c29147f14"
     },
     {
-      "id": "optimized_vllm_rec64",
-      "label": "Optimized native vLLM, eight replicas, rec64",
+      "id": "optimized_native_vllm",
+      "label": "Optimized native vLLM, eight replicas",
       "completed": 30000,
       "failed": 0,
-      "elapsed_s": 427.8647627606988,
-      "images_per_second": 70.11561271470899,
-      "result_path": "publication_runs/optimized_vllm_r8_rec64_jpeg_q100_30k/summary.json",
-      "result_sha256": "a77abaa9afb2fb5a4b5753489f3e9d008f7f39dda42bd0ac2545fb906a55972c",
-      "gpu_trace_path": "publication_runs/optimized_vllm_r8_rec64_jpeg_q100_30k/gpu_trace.csv",
-      "gpu_trace_sha256": "b6ca419d6ec188e8a867aa8ec8a2be17b32eb7255a95ee913a0534a80549dd32"
-    },
-    {
-      "id": "optimized_vllm_rec128_control",
-      "label": "Optimized native vLLM, eight replicas, conservative rec128",
-      "completed": 30000,
-      "failed": 0,
-      "elapsed_s": 431.41853080689907,
-      "images_per_second": 69.53804219742212,
-      "result_path": "publication_runs/optimized_vllm_r8_rec128_jpeg_q100_30k/summary.json",
-      "result_sha256": "5796c1f749a54fab48992b36d957bf27254d78a33a642f9e9881912ef3d07b95",
-      "gpu_trace_path": "publication_runs/optimized_vllm_r8_rec128_jpeg_q100_30k/gpu_trace.csv",
-      "gpu_trace_sha256": "396e8b8722d7d73bfccd5582fda6e121e034a36345343f8632c0bf0f6473e6a7"
+      "elapsed_s": 351.3122023791075,
+      "images_per_second": 85.39413034001718,
+      "result_path": "native_vllm_config_sweeps/final-optimized-30k/r8-seq40-c64-mps25-rec128-exact-fusions/benchmark/summary.json",
+      "result_sha256": "4661f889a476adbc12eeaa3dea19da6058b5032bedf55cace1d4ddbf352e8252",
+      "gpu_trace_path": "native_vllm_config_sweeps/final-optimized-30k/r8-seq40-c64-mps25-rec128-exact-fusions/benchmark/gpu_trace.csv",
+      "gpu_trace_sha256": "cc4c18b0eabae7ef527a59ba8962539ed0684bf334c388b3d368b49cadf6824d"
     }
   ],
-  "speedups": {
-    "vllm_baseline_vs_official_hf": 1.404759849158626,
-    "optimized_rec64_vs_official_hf": 2.244009320197907,
-    "optimized_rec64_vs_vllm_baseline": 1.597432701071251
+  "optimized_configuration": {
+    "replicas": 8,
+    "max_num_seqs_per_replica": 40,
+    "concurrency_per_endpoint": 64,
+    "total_concurrency": 512,
+    "renderer_workers_per_replica": 4,
+    "detector_max_batch_size": 16,
+    "recognizer_chunk_size": 128,
+    "relational_chunk_size": 128,
+    "mps_active_thread_percentage_per_replica": 25,
+    "gpu_memory_utilization": 0.85
   },
-  "limitations": [
-    "Recognizer chunk 64 quality impact is unresolved; rec128 is the conservative accuracy profile.",
-    "The official-HF output comparison is agreement with one model run, not ground-truth accuracy.",
-    "The optimized run depends on a model-source patch archived with the benchmark but external to the vLLM package and official model repository, plus a rebuilt CUDA extension.",
-    "The earlier 23.2688 images/s baseline is excluded because two full jobs overlapped for 98.6% of their timed spans."
-  ]
+  "speedups": {
+    "clean_vllm_vs_official_hf": 1.44542826751498,
+    "optimized_vs_official_hf": 2.7329893721800698,
+    "optimized_vs_clean_vllm": 1.8907817382585854
+  },
+  "quality_gate": {
+    "detector_batches_checked_bitwise": [1, 8, 16],
+    "paired_pages": 1000,
+    "candidate_vs_control_region_sequence_edits": 18,
+    "control_repeat_region_sequence_edits": 19,
+    "candidate_exact_page_text_sequences": 984,
+    "control_repeat_exact_page_text_sequences": 982,
+    "candidate_repeat_region_sequence_edits": 10,
+    "segmentation_change_pages": 1,
+    "segmentation_changes_preserve_space_joined_text": true,
+    "verdict": "no_output_regression_detected",
+    "scope": "Output agreement against repeated controls; not labeled-ground-truth OCR accuracy."
+  },
+  "artifact_bundle": "https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/results/final-85-imgs/results/a100-2026-07-09-final-85-imgs"
 }
