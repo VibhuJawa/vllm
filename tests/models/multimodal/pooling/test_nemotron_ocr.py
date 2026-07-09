@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from PIL import Image
 
@@ -105,6 +106,59 @@ def test_nemotron_ocr_payload_codec_round_trip():
     assert tensor_to_json(tensor) == payload
 
 
+def test_nemotron_ocr_batched_payload_codec_handles_padding_and_unicode():
+    model_config = SimpleNamespace(
+        model="nvidia/nemotron-ocr-v2",
+        revision=None,
+        hf_config=NemotronOCRV2Config(),
+    )
+    model = NemotronOCRV2ForImageToText(
+        SimpleNamespace(model_config=model_config),
+    )
+    payloads = [
+        {
+            "regions": [
+                {
+                    "text": np.str_("short"),
+                    "confidence": np.float32(0.5),
+                    "index": np.int64(7),
+                }
+            ]
+        },
+        {"regions": [{"text": "longer 日本語 payload"}]},
+    ]
+
+    encoded = model._encode_payloads(payloads, torch.device("cpu"))
+
+    assert encoded.ndim == 2
+    assert encoded.shape[0] == len(payloads)
+    assert [tensor_to_json(row) for row in encoded] == [
+        {
+            "regions": [
+                {"text": "short", "confidence": 0.5, "index": 7}
+            ]
+        },
+        payloads[1],
+    ]
+
+
+def test_nemotron_ocr_batched_payload_codec_rejects_oversize_payload():
+    model_config = SimpleNamespace(
+        model="nvidia/nemotron-ocr-v2",
+        revision=None,
+        hf_config=NemotronOCRV2Config(),
+    )
+    model = NemotronOCRV2ForImageToText(
+        SimpleNamespace(model_config=model_config),
+    )
+
+    with pytest.raises(ValueError, match="max supported"):
+        model._encode_payloads(
+            [{"text": "x" * (1024 * 1024 + 1)}],
+            torch.device("cpu"),
+        )
+
+
 def test_nemotron_ocr_model_loader_does_not_consume_hf_weight_iterator():
     hf_config = NemotronOCRV2Config()
     model_config = SimpleNamespace(
@@ -153,6 +207,28 @@ def test_nemotron_ocr_io_processor_accepts_image_url_data_uri():
     assert parsed.size == (4, 3)
 
 
+def test_nemotron_ocr_io_processor_fast_decodes_jpeg_data_uri(monkeypatch):
+    image = Image.new("RGB", (8, 4), color=(17, 83, 211))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=100, subsampling=0)
+    image_url = "data:image/jpeg;base64," + base64.b64encode(
+        buffer.getvalue()
+    ).decode()
+    processor = NemotronOCRV2IOProcessor(vllm_config=None, renderer=None)
+    monkeypatch.setattr(
+        "vllm.plugins.io_processors.nemotron_ocr.envs.VLLM_MAX_IMAGE_PIXELS",
+        0,
+    )
+
+    parsed = processor.parse_data({"image_url": {"url": image_url}})
+    with Image.open(BytesIO(buffer.getvalue())) as decoded:
+        expected = np.array(decoded.convert("RGB"))
+    actual = _image_to_chw_uint8(parsed).permute(1, 2, 0).numpy()
+
+    assert isinstance(parsed, np.ndarray)
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_nemotron_ocr_io_processor_round_trip(tmp_path: Path):
     image_path = tmp_path / "page.png"
     Image.new("RGB", (8, 4), color="white").save(image_path)
@@ -174,3 +250,24 @@ def test_nemotron_ocr_io_processor_round_trip(tmp_path: Path):
     )
 
     assert processor.post_process([output]) == payload
+
+
+def test_nemotron_ocr_local_decoder_preserves_fast_and_fallback_formats(
+    tmp_path: Path,
+):
+    processor = NemotronOCRV2IOProcessor(vllm_config=None, renderer=None)
+    expected = np.zeros((4, 8, 3), dtype=np.uint8)
+    expected[..., 0] = 17
+    expected[..., 1] = 83
+    expected[..., 2] = 211
+
+    for suffix in ("png", "jpg", "tiff", "bmp"):
+        image_path = tmp_path / f"page.{suffix}"
+        Image.fromarray(expected).save(image_path)
+
+        parsed = processor.parse_data(image_path)
+        actual = _image_to_chw_uint8(parsed).permute(1, 2, 0).numpy()
+        with Image.open(image_path) as image:
+            expected_decoded = np.array(image.convert("RGB"))
+
+        np.testing.assert_array_equal(actual, expected_decoded)

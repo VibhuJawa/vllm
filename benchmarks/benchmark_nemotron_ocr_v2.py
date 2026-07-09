@@ -53,6 +53,20 @@ def parse_args():
         help="Fraction of GPU memory each vLLM engine may reserve.",
     )
     parser.add_argument(
+        "--mm-processor-cache-gb",
+        type=float,
+        default=0.0,
+        help=(
+            "vLLM multimodal processor cache size. Nemotron's custom processor "
+            "does not reuse the default cache, so zero avoids pixel hashing."
+        ),
+    )
+    parser.add_argument(
+        "--enable-prefix-caching",
+        action="store_true",
+        help="Enable vLLM prefix caching (disabled by default for OCR pooling).",
+    )
+    parser.add_argument(
         "--request-batch-size",
         type=int,
         default=0,
@@ -63,6 +77,60 @@ def parse_args():
         ),
     )
     parser.add_argument("--warmup", type=int, default=8)
+    parser.add_argument(
+        "--replay-count",
+        type=int,
+        default=1,
+        help=(
+            "Number of complete replays of the selected unique image set in "
+            "the timed workload. Replays form one continuous workload."
+        ),
+    )
+    parser.add_argument(
+        "--priming-replays",
+        type=int,
+        default=0,
+        help=(
+            "Untimed complete replays of the selected image set after --warmup "
+            "and before the coordinated timed start."
+        ),
+    )
+    parser.add_argument(
+        "--ready-file",
+        type=Path,
+        help=(
+            "Write this file after warmup and untimed priming, immediately "
+            "before the timed-start wait."
+        ),
+    )
+    parser.add_argument(
+        "--start-file",
+        type=Path,
+        help="Wait for this file after warmup before starting timed inference.",
+    )
+    parser.add_argument(
+        "--start-timeout-s",
+        type=float,
+        default=600,
+        help="Maximum coordinated-start wait when --start-file is set.",
+    )
+    parser.add_argument(
+        "--shared-queue-file",
+        type=Path,
+        help=(
+            "Optional shared counter file for dynamic multi-replica work "
+            "distribution. All workers must receive the same full image list."
+        ),
+    )
+    parser.add_argument(
+        "--queue-chunk-size",
+        type=int,
+        default=0,
+        help=(
+            "Images claimed per shared-queue iteration. "
+            "Set 0 to use --batch-size."
+        ),
+    )
     parser.add_argument("--merge-level", default="paragraph")
     parser.add_argument(
         "--infer-length",
@@ -79,6 +147,11 @@ def parse_args():
     )
     parser.add_argument("--output-json", type=Path)
     parser.add_argument(
+        "--predictions-json",
+        type=Path,
+        help="Optionally save ordered OCR payloads for output-equivalence checks.",
+    )
+    parser.add_argument(
         "--gpu-trace-csv",
         type=Path,
         help="Write a sampled nvidia-smi GPU utilization trace around the run.",
@@ -88,6 +161,13 @@ def parse_args():
         type=int,
         default=500,
         help="Sampling interval for --gpu-trace-csv.",
+    )
+    parser.add_argument(
+        "--gpu-trace-device",
+        help=(
+            "Optional nvidia-smi GPU selector (index or UUID). "
+            "Required for unambiguous traces on multi-GPU hosts."
+        ),
     )
     parser.add_argument(
         "--disable-io-processor",
@@ -254,20 +334,77 @@ def batches(items: list[Path], batch_size: int) -> Iterable[list[Path]]:
         yield items[start : start + batch_size]
 
 
-def start_gpu_trace(path: Path, interval_ms: int) -> tuple[subprocess.Popen, Any]:
+def replay_images(images: list[Path], replay_count: int) -> list[Path]:
+    """Build one continuous workload from repeated passes over unique images."""
+    return images * replay_count
+
+
+def coordinate_timed_start(args) -> None:
+    if args.ready_file is not None:
+        args.ready_file.parent.mkdir(parents=True, exist_ok=True)
+        args.ready_file.write_text(str(time.time()), encoding="utf-8")
+
+    if args.start_file is None:
+        return
+    if args.start_timeout_s <= 0:
+        raise ValueError("--start-timeout-s must be positive.")
+
+    deadline = time.monotonic() + args.start_timeout_s
+    while not args.start_file.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Timed out waiting for coordinated start: {args.start_file}"
+            )
+        time.sleep(0.05)
+
+
+def claim_shared_queue(
+    path: Path,
+    *,
+    total: int,
+    chunk_size: int,
+) -> tuple[int, int]:
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("r+", encoding="utf-8") as file:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+        try:
+            value = file.read().strip()
+            start = int(value) if value else 0
+            finish = min(start + chunk_size, total)
+            file.seek(0)
+            file.truncate()
+            file.write(str(finish))
+            file.flush()
+        finally:
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+    return start, finish
+
+
+def start_gpu_trace(
+    path: Path,
+    interval_ms: int,
+    device: str | None = None,
+) -> tuple[subprocess.Popen, Any]:
     if interval_ms <= 0:
         raise ValueError("--gpu-trace-interval-ms must be positive.")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     output = path.open("w", encoding="utf-8")
-    proc = subprocess.Popen(
+    cmd = ["nvidia-smi"]
+    if device is not None:
+        cmd.extend(["-i", device])
+    cmd.extend(
         [
-            "nvidia-smi",
             f"--query-gpu={GPU_TRACE_QUERY}",
             "--format=csv",
             "-lms",
             str(interval_ms),
-        ],
+        ]
+    )
+    proc = subprocess.Popen(
+        cmd,
         stdout=output,
         stderr=subprocess.DEVNULL,
     )
@@ -356,6 +493,8 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
         io_processor_plugin=None if args.disable_io_processor else "nemotron_ocr_v2",
         max_num_seqs=max(args.batch_size, 1),
         gpu_memory_utilization=args.gpu_memory_utilization,
+        mm_processor_cache_gb=args.mm_processor_cache_gb,
+        enable_prefix_caching=args.enable_prefix_caching,
         hf_overrides=hf_overrides(
             args,
             use_io_processor=not args.disable_io_processor,
@@ -376,6 +515,12 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
             for path in batch
         ]
 
+    predictions: list[Any] | None = [] if args.predictions_json is not None else None
+
+    def record_outputs(outputs) -> None:
+        if predictions is not None:
+            predictions.extend(output.outputs for output in outputs)
+
     warmup = images[: args.warmup]
     if warmup:
         llm.encode(
@@ -383,27 +528,78 @@ def run_vllm_backend(args, images: list[Path]) -> dict[str, Any]:
             pooling_task="plugin",
             use_tqdm=False,
         )
-        torch.cuda.synchronize()
 
-    timed = images[: args.limit]
+    priming_batch_size = (
+        args.queue_chunk_size or args.batch_size
+        if args.shared_queue_file is not None
+        else args.request_batch_size
+    )
+    for _ in range(args.priming_replays):
+        for batch in batches(images, priming_batch_size):
+            llm.encode(
+                prompts_for(batch),
+                pooling_task="plugin",
+                use_tqdm=False,
+            )
+
+    coordinate_timed_start(args)
+    timed = replay_images(images, args.replay_count)
+    timed_started_at_epoch_s = time.time()
     start = time.perf_counter()
-    request_batch_size = args.request_batch_size or len(timed)
-    for batch in batches(timed, request_batch_size):
-        llm.encode(
-            prompts_for(batch),
-            pooling_task="plugin",
-            use_tqdm=False,
-        )
-    torch.cuda.synchronize()
+    if args.shared_queue_file is not None:
+        request_batch_size = args.queue_chunk_size or args.batch_size
+        if request_batch_size <= 0:
+            raise ValueError("Shared queue chunk size must be positive.")
+        count = 0
+        while True:
+            batch_start, batch_finish = claim_shared_queue(
+                args.shared_queue_file,
+                total=len(timed),
+                chunk_size=request_batch_size,
+            )
+            if batch_start >= len(timed):
+                break
+            batch = timed[batch_start:batch_finish]
+            outputs = llm.encode(
+                prompts_for(batch),
+                pooling_task="plugin",
+                use_tqdm=False,
+            )
+            record_outputs(outputs)
+            count += len(batch)
+    else:
+        request_batch_size = args.request_batch_size or len(timed)
+        count = len(timed)
+        for batch in batches(timed, request_batch_size):
+            outputs = llm.encode(
+                prompts_for(batch),
+                pooling_task="plugin",
+                use_tqdm=False,
+            )
+            record_outputs(outputs)
     elapsed = time.perf_counter() - start
+    timed_finished_at_epoch_s = time.time()
     return {
         "backend": "vllm",
-        "count": len(timed),
+        "count": count,
         "elapsed_s": elapsed,
         "request_batch_size": request_batch_size,
         "max_num_seqs": args.batch_size,
         "gpu_memory_utilization": args.gpu_memory_utilization,
+        "mm_processor_cache_gb": args.mm_processor_cache_gb,
+        "enable_prefix_caching": args.enable_prefix_caching,
         "plugin_prompt_mode": args.plugin_prompt_mode,
+        "shared_queue_file": (
+            str(args.shared_queue_file)
+            if args.shared_queue_file is not None
+            else None
+        ),
+        "queue_chunk_size": (
+            request_batch_size if args.shared_queue_file is not None else None
+        ),
+        "timed_started_at_epoch_s": timed_started_at_epoch_s,
+        "timed_finished_at_epoch_s": timed_finished_at_epoch_s,
+        "_predictions": predictions,
     }
 
 
@@ -436,15 +632,28 @@ def run_direct_backend(args, images: list[Path]) -> dict[str, Any]:
     if warmup:
         run_batch(warmup)
 
-    timed = images[: args.limit]
+    for _ in range(args.priming_replays):
+        for batch in batches(images, args.batch_size):
+            run_batch(batch)
+
+    coordinate_timed_start(args)
+    timed = replay_images(images, args.replay_count)
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
+    timed_started_at_epoch_s = time.time()
     start = time.perf_counter()
     for batch in batches(timed, args.batch_size):
         run_batch(batch)
     elapsed = time.perf_counter() - start
+    timed_finished_at_epoch_s = time.time()
 
-    result = {"backend": "direct", "count": len(timed), "elapsed_s": elapsed}
+    result = {
+        "backend": "direct",
+        "count": len(timed),
+        "elapsed_s": elapsed,
+        "timed_started_at_epoch_s": timed_started_at_epoch_s,
+        "timed_finished_at_epoch_s": timed_finished_at_epoch_s,
+    }
     if torch.cuda.is_available():
         result["peak_gpu_memory_gb"] = torch.cuda.max_memory_allocated() / 1e9
     return result
@@ -452,6 +661,18 @@ def run_direct_backend(args, images: list[Path]) -> dict[str, Any]:
 
 def main():
     args = parse_args()
+    if args.limit <= 0:
+        raise ValueError("--limit must be positive.")
+    if args.warmup < 0:
+        raise ValueError("--warmup must be non-negative.")
+    if args.replay_count <= 0:
+        raise ValueError("--replay-count must be positive.")
+    if args.priming_replays < 0:
+        raise ValueError("--priming-replays must be non-negative.")
+    if args.shared_queue_file is not None and args.backend != "vllm":
+        raise ValueError("--shared-queue-file currently requires --backend vllm.")
+    if args.predictions_json is not None and args.backend != "vllm":
+        raise ValueError("--predictions-json currently requires --backend vllm.")
     image_dir = prepare_safedocs(args) if args.prepare_safedocs else args.image_dir
     if image_dir is None:
         raise ValueError("Pass --image-dir or --prepare-safedocs.")
@@ -464,6 +685,7 @@ def main():
             trace_proc, trace_output = start_gpu_trace(
                 args.gpu_trace_csv,
                 args.gpu_trace_interval_ms,
+                args.gpu_trace_device,
             )
 
         if args.backend == "vllm":
@@ -474,19 +696,66 @@ def main():
         if trace_proc is not None and trace_output is not None:
             stop_gpu_trace(trace_proc, trace_output)
 
+    predictions = result.pop("_predictions", None)
+    if args.predictions_json is not None:
+        if predictions is None:
+            raise RuntimeError("Selected backend did not return OCR predictions.")
+        args.predictions_json.parent.mkdir(parents=True, exist_ok=True)
+        args.predictions_json.write_text(
+            json.dumps(predictions, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    global_timed_count = len(images) * args.replay_count
+    shared_queue = args.shared_queue_file is not None
     result.update(
         {
             "model": args.model,
             "model_subdir": args.model_subdir,
             "batch_size": args.batch_size,
             "image_offset": args.image_offset,
+            "unique_image_count": len(images),
+            "replay_count": args.replay_count,
+            # A dynamic-queue worker may process only a subset (or no work).
+            # Report its local count separately from the globally available
+            # workload so multi-process aggregators cannot confuse the two.
+            "timed_workload_image_count": result["count"],
+            "global_timed_workload_image_count": global_timed_count,
+            "timed_repeated_image_count": (
+                None
+                if shared_queue
+                else len(images) * (args.replay_count - 1)
+            ),
+            "priming_replays": args.priming_replays,
+            "priming_image_count": min(args.warmup, len(images))
+            + len(images) * args.priming_replays,
             "infer_length": args.infer_length,
             "profile_ocr": args.profile_ocr,
+            "ready_file": (
+                str(args.ready_file) if args.ready_file is not None else None
+            ),
+            "start_file": (
+                str(args.start_file) if args.start_file is not None else None
+            ),
             "gpu_trace_csv": (
                 str(args.gpu_trace_csv) if args.gpu_trace_csv is not None else None
             ),
-            "images_per_second": result["count"] / result["elapsed_s"],
-            "ms_per_image": result["elapsed_s"] * 1000 / result["count"],
+            "gpu_trace_device": args.gpu_trace_device,
+            "predictions_json": (
+                str(args.predictions_json)
+                if args.predictions_json is not None
+                else None
+            ),
+            "images_per_second": (
+                result["count"] / result["elapsed_s"]
+                if result["count"]
+                else 0.0
+            ),
+            "ms_per_image": (
+                result["elapsed_s"] * 1000 / result["count"]
+                if result["count"]
+                else None
+            ),
         }
     )
     if args.gpu_trace_csv is not None:

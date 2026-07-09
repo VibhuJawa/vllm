@@ -772,7 +772,7 @@ async def benchmark(
     base_url: str,
     model_id: str,
     model_name: str,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     input_requests: list[SampleRequest],
     logprobs: int | None,
     request_rate: float,
@@ -1120,6 +1120,7 @@ async def benchmark(
     metrics: BenchmarkMetrics | EmbedBenchmarkMetrics
     actual_output_lens: list[int] | int
     if task_type == TaskType.GENERATION:
+        assert tokenizer is not None
         metrics, actual_output_lens = calculate_metrics(
             input_requests=input_requests,
             outputs=outputs,
@@ -1216,12 +1217,22 @@ async def benchmark(
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
+            "failed": metrics.failed,
             "total_input_tokens": metrics.total_input,
             "request_throughput": metrics.request_throughput,
             "total_token_throughput": metrics.total_token_throughput,
             "input_lens": [output.prompt_len for output in outputs],
             "errors": [output.error for output in outputs],
         }
+
+    # `time.perf_counter()` is system-wide on supported platforms, so these
+    # bounds can be compared across concurrently launched benchmark clients.
+    # This lets multi-replica pooling runs report a true aggregate span rather
+    # than summing per-client rates with potentially different start times.
+    result["benchmark_started_at_monotonic_s"] = benchmark_start_time
+    result["benchmark_finished_at_monotonic_s"] = (
+        benchmark_start_time + benchmark_duration
+    )
 
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
@@ -2036,7 +2047,13 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.self_timed = False
 
     # Load the dataset.
-    assert tokenizer is not None, "Tokenizer must be initialized before loading dataset"
+    if tokenizer is None and (
+        args.dataset_name != "custom" or args.backend not in POOLING_BACKENDS
+    ):
+        raise ValueError(
+            "--skip-tokenizer-init is currently supported only with the "
+            "custom dataset and a pooling backend."
+        )
     input_requests = get_samples(args, tokenizer)
 
     if args.dataset_name in ("random", "prefix_repetition"):

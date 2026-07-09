@@ -1,0 +1,688 @@
+diff --git a/nemotron-ocr/cpp/cuda_intellisense.cuh b/nemotron-ocr/cpp/cuda_intellisense.cuh
+index 76de9af9ba2ebc411b56e72c3551f80b1275449b..6669eabcd0791b51104952fedae0ded36299481a 100644
+--- a/nemotron-ocr/cpp/cuda_intellisense.cuh
++++ b/nemotron-ocr/cpp/cuda_intellisense.cuh
+@@ -3,6 +3,10 @@
+ 
+ #pragma once
+ 
++#ifdef __NVCC__
++#include <ATen/cuda/CUDAContext.h>
++#endif
++
+ #if defined(__INTELLISENSE__) || !defined(__NVCC__)
+ #ifndef KERNEL_ARG2
+ #define KERNEL_ARG2(grid, block)
+@@ -27,8 +31,10 @@ dim3 gridDim;
+ 
+ #else
+ #ifndef KERNEL_ARG2
+-#define KERNEL_ARG2(grid, block) <<< grid, block >>>
+-#define KERNEL_ARG3(grid, block, sh_mem) <<< grid, block, sh_mem >>>
++#define KERNEL_ARG2(grid, block) \
++    <<< grid, block, 0, at::cuda::getCurrentCUDAStream().stream() >>>
++#define KERNEL_ARG3(grid, block, sh_mem) \
++    <<< grid, block, sh_mem, at::cuda::getCurrentCUDAStream().stream() >>>
+ #define KERNEL_ARG4(grid, block, sh_mem, stream) <<< grid, block, sh_mem, stream >>>
+ #endif
+ #endif
+diff --git a/nemotron-ocr/cpp/local_ips/quad_all_2_all_dist_v2.cu b/nemotron-ocr/cpp/local_ips/quad_all_2_all_dist_v2.cu
+index 9ee2719581d7cbe16063501f94ab12dd436d1be1..9bd7ddf32740476a959b43bc935c09e768fc04ba 100644
+--- a/nemotron-ocr/cpp/local_ips/quad_all_2_all_dist_v2.cu
++++ b/nemotron-ocr/cpp/local_ips/quad_all_2_all_dist_v2.cu
+@@ -143,7 +143,10 @@ torch::Tensor ragged_quad_all_2_all_distance_v2(torch::Tensor embedQuads, torch:
+ 
+     auto csWorkPerExample = torch::cumsum(workPerExample, 0);
+ 
+-    int64_t totalWork = csWorkPerExample[-1].item<int64_t>();
++    // Launch from tensor metadata so we do not synchronize to read a CUDA
++    // scalar. The kernel already bounds-checks against the exact cumulative
++    // work count.
++    int64_t totalWork = embedQuads.size(0) * embedQuads.size(1) * embedQuads.size(1);
+ 
+     dim3 blockSize(16, 2);
+     dim3 gridSize(div_up(totalWork, blockSize.y), 1);
+diff --git a/nemotron-ocr/cpp/non_maximal_suppression/cuda_non_maximal_suppression.cu b/nemotron-ocr/cpp/non_maximal_suppression/cuda_non_maximal_suppression.cu
+index c248af4a975b93b722d290c5b6341676bdf14746..1b7e45c199897988655f2ba94d8260ab8656f817 100644
+--- a/nemotron-ocr/cpp/non_maximal_suppression/cuda_non_maximal_suppression.cu
++++ b/nemotron-ocr/cpp/non_maximal_suppression/cuda_non_maximal_suppression.cu
+@@ -3,6 +3,7 @@
+ 
+ #include "non_maximal_suppression.h"
+ 
++#include <algorithm>
+ #include <cooperative_groups.h>
+ #include <cooperative_groups/reduce.h>
+ 
+@@ -1028,6 +1029,7 @@ struct CollapseRowsResult {
+     torch::Tensor ExCounts;
+     torch::Tensor StridedMergeQuads;
+     int32_t TotalNumQuads;
++    int32_t MaxExCount;
+     // NOTE: This will only be available in Debug builds
+     torch::Tensor QuadIds;
+     int32_t ImageWidth;
+@@ -1096,16 +1098,18 @@ CollapseRowsResult collapse_rows(
+     }
+ #endif
+ 
+-    // The final value in `counts` is actually to total number of quads for the entire batch
+-    int32_t totalQuads = counts[-1].item<int32_t>();
++    // Copy this tiny counter vector once. Reading the total and maximum via
++    // separate CUDA scalar operations would introduce two stream barriers and
++    // launch an unnecessary device reduction.
++    auto countsCpu = counts.cpu();
++    auto countsCpuAcc = countsCpu.accessor<int32_t, 1>();
++    int32_t totalQuads = countsCpuAcc[countsCpuAcc.size(0) - 1];
+ 
+     counts = counts.slice(/*dim=*/ 0, 0, counts.size(0) - 1);
+ 
+-    int64_t maxExCount;
+-    if (counts.size(0) > 1) {
+-        maxExCount = counts.max().item<int32_t>();
+-    } else {
+-        maxExCount = totalQuads;
++    int32_t maxExCount = 0;
++    for (int64_t i = 0; i < counts.size(0); ++i) {
++        maxExCount = std::max(maxExCount, countsCpuAcc[i]);
+     }
+ 
+     static bool s_sortOrder = false;
+@@ -1119,7 +1123,15 @@ CollapseRowsResult collapse_rows(
+     rowMergeTensor = torch::gather(rowMergeTensor, /*dim=*/ 2, embOrder);
+     idsTensor = torch::gather(idsTensor, /*dim=*/ 1, order);
+ 
+-    return { counts, rowMergeTensor, totalQuads, idsTensor, imageWidth, imageHeight };
++    return {
++        counts,
++        rowMergeTensor,
++        totalQuads,
++        maxExCount,
++        idsTensor,
++        imageWidth,
++        imageHeight,
++    };
+ }
+ 
+ 
+@@ -1247,12 +1259,7 @@ AdjacencyResult compute_all_to_all_adjacency(
+ {
+     torch::Tensor counts = collapseResult.ExCounts;
+ 
+-    int64_t maxExCount;
+-    if (counts.size(0) > 1) {
+-        maxExCount = counts.max().item<int32_t>();
+-    } else {
+-        maxExCount = collapseResult.TotalNumQuads;
+-    }
++    const int64_t maxExCount = collapseResult.MaxExCount;
+ 
+     auto isStartTensor = torch::ones({ counts.size(0), maxExCount }, counts.options().dtype(torch::kBool));
+     auto adjCountsTensor = torch::zeros({ counts.size(0), maxExCount }, counts.options().dtype(torch::kInt32));
+@@ -1595,7 +1602,7 @@ nms_result_t cuda_quad_non_maximal_suppression_impl(
+     torch::Tensor retQuads, retConf, regionCounts;
+ 
+     {
+-        CudaStoreTimer tTotal{msTotal, s_timerEnabled};
++        CudaStoreTimer tTotal{msTotal, s_timerEnabled && verbose};
+         {
+             CudaStoreTimer t{msRowCollapse, s_timerEnabled && verbose && s_verboseLevel2};
+ 
+diff --git a/nemotron-ocr/src/nemotron_ocr/inference/encoders/relational_encoder.py b/nemotron-ocr/src/nemotron_ocr/inference/encoders/relational_encoder.py
+index 0316061993f0dd399dfa090584830bc24bb0b32e..41cb055c185e9a1b3901cd84e12679faac2cc35e 100644
+--- a/nemotron-ocr/src/nemotron_ocr/inference/encoders/relational_encoder.py
++++ b/nemotron-ocr/src/nemotron_ocr/inference/encoders/relational_encoder.py
+@@ -20,6 +20,39 @@ from nemotron_ocr_cpp import dense_relations_to_graph as cpp_dense_relations_to_
+ logging.getLogger("shapely.geos").setLevel(logging.FATAL)
+ 
+ 
++def _copy_tensors_to_cpu_batched(tensors):
++    """Copy CUDA tensors to pinned host memory with one wait per stream.
++
++    Calling ``Tensor.cpu()`` for each relation matrix serializes every D2H
++    transfer with the host.  Stage all copies first so CUDA can process them as
++    one queue, then wait once before the CPU graph code dereferences them.
++    """
++    cpu_tensors = []
++    pending_streams = {}
++
++    for tensor in tensors:
++        if tensor is None or tensor.device.type == "cpu":
++            cpu_tensors.append(tensor)
++            continue
++
++        if tensor.device.type != "cuda":
++            cpu_tensors.append(tensor.cpu())
++            continue
++
++        with torch.cuda.device(tensor.device):
++            stream = torch.cuda.current_stream(tensor.device)
++            cpu_tensor = torch.empty_like(tensor, device="cpu", pin_memory=True)
++            cpu_tensor.copy_(tensor, non_blocking=True)
++
++        cpu_tensors.append(cpu_tensor)
++        pending_streams[(tensor.device.index, stream.cuda_stream)] = stream
++
++    for stream in pending_streams.values():
++        stream.synchronize()
++
++    return cpu_tensors
++
++
+ class RelationalTargetEncoder(TargetEncoderBase):
+     def __init__(self, input_size, amp_opt=0, is_train=True):
+         super().__init__(input_size, amp_opt, False)
+@@ -38,13 +71,14 @@ class RelationalTargetEncoder(TargetEncoderBase):
+         if all_word_relations[0].dim() == 1:
+             all_word_relations = [sparse_to_dense(gt_rel) for gt_rel in all_word_relations]
+ 
+-        all_word_relations_cpu = [r.cpu() if r is not None else r for r in all_word_relations]
++        all_word_relations_cpu = _copy_tensors_to_cpu_batched(all_word_relations)
+ 
+         region_counts = region_counts.cpu()
+         all_quads_cpu = all_quads.cpu()
+         cs_region_counts = torch.cumsum(region_counts, 0)
+ 
+-        examples = []
++        prepared_examples = []
++        pending_line_graphs = []
+         for i, word_relations_cpu in enumerate(all_word_relations_cpu):
+             start_offset = cs_region_counts[i - 1] if i > 0 else 0
+             end_offset = cs_region_counts[i]
+@@ -55,14 +89,36 @@ class RelationalTargetEncoder(TargetEncoderBase):
+             regions = [tr.TextRegion(Quadrangle(q), "") for q in quads]
+             graph = None
+             if end_offset > start_offset:
+-                graph = self.dense_relations_to_graph(
+-                    word_relations_cpu, line_relations, line_unc, is_gt
++                lines = self._word_relations_to_lines(word_relations_cpu)
++                line_to_line_probs = self._build_line_relation_probs(
++                    lines,
++                    word_relations_cpu.shape[0],
++                    line_relations,
++                    line_unc,
++                    is_gt,
++                )
++                pending_line_graphs.append(
++                    (len(prepared_examples), lines, line_to_line_probs)
+                 )
+             else:
+                 graph = tr.RelationGraph()
+ 
+-            ex = tr.Example(regions, relation_graph=graph)
+-            examples.append(ex)
++            prepared_examples.append([regions, graph])
++
++        line_probs_cpu = _copy_tensors_to_cpu_batched(
++            [line_probs for _, _, line_probs in pending_line_graphs]
++        )
++        for (example_idx, lines, _), line_probs in zip(
++            pending_line_graphs, line_probs_cpu
++        ):
++            prepared_examples[example_idx][1] = self._line_probs_to_graph(
++                lines, line_probs
++            )
++
++        examples = [
++            tr.Example(regions, relation_graph=graph)
++            for regions, graph in prepared_examples
++        ]
+ 
+         if limit_idxs is not None:
+             examples = [examples[idx] for idx in limit_idxs]
+@@ -76,8 +132,31 @@ class RelationalTargetEncoder(TargetEncoderBase):
+         line_log_uncertainty: torch.Tensor = None,
+         is_gt=False,
+     ):
+-        lines = [p[0] for p in cpp_dense_relations_to_graph(word_relations)]
+-
++        lines = self._word_relations_to_lines(word_relations)
++        line_to_line_probs = self._build_line_relation_probs(
++            lines,
++            word_relations.shape[0],
++            line_logits,
++            line_log_uncertainty,
++            is_gt,
++        )
++        line_to_line_probs_cpu = _copy_tensors_to_cpu_batched(
++            [line_to_line_probs]
++        )[0]
++        return self._line_probs_to_graph(lines, line_to_line_probs_cpu)
++
++    @staticmethod
++    def _word_relations_to_lines(word_relations):
++        return [p[0] for p in cpp_dense_relations_to_graph(word_relations)]
++
++    @staticmethod
++    def _build_line_relation_probs(
++        lines,
++        n_words,
++        line_logits,
++        line_log_uncertainty=None,
++        is_gt=False,
++    ):
+         dev = line_logits.device
+         line_logits = line_logits.float()
+ 
+@@ -91,14 +170,14 @@ class RelationalTargetEncoder(TargetEncoderBase):
+         else:
+             inv_uncertainty = torch.ones_like(line_logits)
+ 
+-        n_words = word_relations.shape[0]
+-
+         line_lengths = torch.tensor([len(line) for line in lines], dtype=torch.int64, device=dev)
+         word_indices = torch.tensor(
+             [word for line in lines for word in line], dtype=torch.int64, device=dev
+         )
+         line_ids = torch.repeat_interleave(
+-            torch.arange(len(lines), dtype=torch.int64, device=dev), line_lengths
++            torch.arange(len(lines), dtype=torch.int64, device=dev),
++            line_lengths,
++            output_size=word_indices.numel(),
+         )
+         w_idx_to_line_map = torch.empty(n_words, dtype=torch.int64, device=dev)
+         w_idx_to_line_map[word_indices] = line_ids
+@@ -156,7 +235,14 @@ class RelationalTargetEncoder(TargetEncoderBase):
+         )
+         line_to_line_probs = line_to_line_probs[:, 1:]
+ 
+-        rel_lines = set(tuple(p[0]) for p in cpp_dense_relations_to_graph(line_to_line_probs.cpu()))
++        return line_to_line_probs
++
++    @staticmethod
++    def _line_probs_to_graph(lines, line_to_line_probs_cpu):
++        rel_lines = set(
++            tuple(p[0])
++            for p in cpp_dense_relations_to_graph(line_to_line_probs_cpu)
++        )
+ 
+         paragraphs = []
+         for rel_line in rel_lines:
+diff --git a/nemotron-ocr/src/nemotron_ocr/inference/models/relational.py b/nemotron-ocr/src/nemotron_ocr/inference/models/relational.py
+index 2d64094d5e472b0a5654306cfecc8d8e18d28546..0ea129c1bc7358425aca4172fed11decaed1145c 100644
+--- a/nemotron-ocr/src/nemotron_ocr/inference/models/relational.py
++++ b/nemotron-ocr/src/nemotron_ocr/inference/models/relational.py
+@@ -334,8 +334,9 @@ class GlobalRelationalModel(nn.Module):
+         rectified_quads = rectified_quads.float()
+         recog_features = recog_features.float()
+ 
+-        assert torch.all(torch.isfinite(rectified_quads))
+-        assert torch.all(torch.isfinite(recog_features))
++        if not self.inference_mode:
++            assert torch.all(torch.isfinite(rectified_quads))
++            assert torch.all(torch.isfinite(recog_features))
+ 
+         proj_rects, _, region_counts, mid_pts = self.get_input_encoding(
+             rectified_quads, original_quads, region_counts, recog_features
+diff --git a/nemotron-ocr/src/nemotron_ocr/inference/pipeline_v2.py b/nemotron-ocr/src/nemotron_ocr/inference/pipeline_v2.py
+index d0fdadc042acb2b5f9e7bcf281e8e1c99fdcce21..4e9cc4209304b51e56ee7032999f66807b6bb1ab 100644
+--- a/nemotron-ocr/src/nemotron_ocr/inference/pipeline_v2.py
++++ b/nemotron-ocr/src/nemotron_ocr/inference/pipeline_v2.py
+@@ -21,6 +21,13 @@ import torch.nn as nn
+ import torch.nn.functional as F
+ from torch import amp
+ 
++try:
++    import triton
++    import triton.language as tl
++except ImportError:  # The standalone model package does not require Triton.
++    triton = None
++    tl = None
++
+ from nemotron_ocr.inference.pipeline import (
+     NemotronOCR,
+     DETECTOR_DOWNSAMPLE,
+@@ -51,6 +58,59 @@ _DEFAULT_MAX_WIDTH = 32
+ _DEFAULT_NUM_TOKENS = 858
+ 
+ 
++if triton is not None:
++
++    @triton.jit
++    def _argmax_softmax_probability_kernel(
++        logits_ptr,
++        ids_ptr,
++        probabilities_ptr,
++        row_stride: tl.constexpr,
++        num_columns: tl.constexpr,
++        BLOCK_SIZE: tl.constexpr,
++    ):
++        row = tl.program_id(0)
++        offsets = tl.arange(0, BLOCK_SIZE)
++        values = tl.load(
++            logits_ptr + row * row_stride + offsets,
++            mask=offsets < num_columns,
++            other=-float("inf"),
++        ).to(tl.float32)
++        max_value = tl.max(values, axis=0)
++        max_index = tl.argmax(values, axis=0)
++        denominator = tl.sum(tl.exp(values - max_value), axis=0)
++        tl.store(ids_ptr + row, max_index)
++        tl.store(probabilities_ptr + row, 1.0 / denominator)
++
++
++def _argmax_softmax_probability(logits):
++    """Return argmax IDs and their softmax probabilities without a full output."""
++    if triton is None or not logits.is_cuda:
++        ids = logits.argmax(dim=2)
++        probabilities = torch.softmax(logits, dim=2).gather(
++            2, ids.unsqueeze(2)
++        ).squeeze(2)
++        return ids, probabilities.float()
++
++    rows = logits.reshape(-1, logits.shape[-1])
++    ids = torch.empty(rows.shape[0], dtype=torch.int64, device=logits.device)
++    probabilities = torch.empty(
++        rows.shape[0], dtype=logits.dtype, device=logits.device
++    )
++    block_size = triton.next_power_of_2(rows.shape[1])
++    _argmax_softmax_probability_kernel[(rows.shape[0],)](
++        rows,
++        ids,
++        probabilities,
++        rows.stride(0),
++        rows.shape[1],
++        BLOCK_SIZE=block_size,
++        num_warps=8,
++    )
++    output_shape = logits.shape[:-1]
++    return ids.view(output_shape), probabilities.view(output_shape).float()
++
++
+ class NemotronOCRV2(NemotronOCR):
+     """Batched OCR inference pipeline.
+ 
+@@ -109,6 +169,22 @@ class NemotronOCRV2(NemotronOCR):
+ 
+         torch.backends.cuda.matmul.allow_tf32 = True
+         torch.backends.cudnn.allow_tf32 = True
++        torch.backends.cudnn.benchmark = os.environ.get(
++            "NEMOTRON_OCR_CUDNN_BENCHMARK", "0"
++        ) == "1"
++        self._detector_channels_last = os.environ.get(
++            "NEMOTRON_OCR_DETECTOR_CHANNELS_LAST", "0"
++        ) == "1"
++        if self._detector_channels_last:
++            self.detector.to(memory_format=torch.channels_last)
++        detector_compile_mode = os.environ.get("NEMOTRON_OCR_COMPILE_DETECTOR")
++        if detector_compile_mode:
++            self.detector = torch.compile(
++                self.detector,
++                mode=detector_compile_mode,
++                dynamic=False,
++                fullgraph=False,
++            )
+ 
+         # ── pad_color ────────────────────────────────────────────────
+         if pad_color is not None:
+@@ -145,6 +221,20 @@ class NemotronOCRV2(NemotronOCR):
+ 
+         if not self._detector_only and hasattr(self, "recognizer"):
+             self._pad_classifier_for_alignment(64)
++            recognizer_compile_mode = os.environ.get(
++                "NEMOTRON_OCR_COMPILE_RECOGNIZER"
++            )
++            self._recognizer_clone_compiled_outputs = recognizer_compile_mode in {
++                "reduce-overhead",
++                "max-autotune",
++            }
++            if recognizer_compile_mode:
++                self.recognizer = torch.compile(
++                    self.recognizer,
++                    mode=recognizer_compile_mode,
++                    dynamic=False,
++                    fullgraph=False,
++                )
+ 
+     # ------------------------------------------------------------------
+     # Tensor-core alignment
+@@ -339,6 +429,8 @@ class NemotronOCRV2(NemotronOCR):
+             for start in range(0, n, self.detector_max_batch_size):
+                 end = min(start + self.detector_max_batch_size, n)
+                 chunk = resized_batch[start:end]
++                if self._detector_channels_last:
++                    chunk = chunk.contiguous(memory_format=torch.channels_last)
+                 c, _, r, f = self.detector(chunk)
+                 conf_parts.append(c)
+                 rbox_parts.append(r)
+@@ -493,14 +585,14 @@ class NemotronOCRV2(NemotronOCR):
+                     chunk = torch.cat([chunk, pad], dim=0)
+                 logits, feats = self.recognizer(chunk)
+ 
+-                ids = logits.argmax(dim=2)
+-                probs = torch.softmax(logits, dim=2).gather(
+-                    2, ids.unsqueeze(2)
+-                ).squeeze(2).float()
++                ids, probs = _argmax_softmax_probability(logits)
+ 
+                 ids_parts.append(ids[:real_n])
+                 probs_parts.append(probs[:real_n])
+-                feat_parts.append(feats[:real_n])
++                real_features = feats[:real_n]
++                if self._recognizer_clone_compiled_outputs:
++                    real_features = real_features.clone()
++                feat_parts.append(real_features)
+ 
+         def _cat_or_single(parts):
+             return parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
+@@ -548,7 +640,12 @@ class NemotronOCRV2(NemotronOCR):
+                 padded_lengths, dtype=torch.float32, device=quads_cuda.device,
+             ) / float(self.infer_length)
+             counts_long = region_counts.to(dtype=torch.long, device=quads_cuda.device)
+-            scale_per_region = torch.repeat_interleave(scale_factors, counts_long, dim=0)
++            scale_per_region = torch.repeat_interleave(
++                scale_factors,
++                counts_long,
++                dim=0,
++                output_size=quads_cuda.shape[0],
++            )
+             quads_scaled = quads_cuda * scale_per_region.view(-1, 1, 1)
+ 
+             seq_ids = rec_ids
+@@ -562,11 +659,9 @@ class NemotronOCRV2(NemotronOCR):
+ 
+             output = {
+                 "sequences": seq_ids.cpu(),
+-                "sequence_probs": seq_probs.cpu(),
+                 "text_confidence": text_confidence.cpu(),
+-                "region_counts": region_counts.cpu(),
++                "region_counts": region_counts_cpu,
+                 "quads": quads_scaled.cpu(),
+-                "raw_detector_confidence": e2e_det_conf,
+                 "confidence": confidence.cpu(),
+                 "relations": words,
+                 "line_relations": lines,
+@@ -574,7 +669,6 @@ class NemotronOCRV2(NemotronOCR):
+                 "fg_colors": None,
+                 "fonts": None,
+                 "tt_log_var_uncertainty": None,
+-                "e2e_recog_features": rec_features,
+             }
+ 
+         return output
+@@ -753,7 +847,12 @@ class NemotronOCRV2(NemotronOCR):
+                     padded_lengths, dtype=torch.float32, device=quads.device,
+                 ) / float(self.infer_length)
+                 counts_long = region_counts.to(dtype=torch.long, device=quads.device)
+-                scale_per_region = torch.repeat_interleave(scale_factors, counts_long, dim=0)
++                scale_per_region = torch.repeat_interleave(
++                    scale_factors,
++                    counts_long,
++                    dim=0,
++                    output_size=quads.shape[0],
++                )
+                 quads_scaled = quads * scale_per_region.view(-1, 1, 1)
+ 
+             region_counts_cpu = region_counts.cpu()
+@@ -814,7 +913,12 @@ class NemotronOCRV2(NemotronOCR):
+                     padded_lengths, dtype=torch.float32, device=quads_cuda.device,
+                 ) / float(self.infer_length)
+                 counts_long = region_counts.to(dtype=torch.long, device=quads_cuda.device)
+-                scale_per_region = torch.repeat_interleave(scale_factors, counts_long, dim=0)
++                scale_per_region = torch.repeat_interleave(
++                    scale_factors,
++                    counts_long,
++                    dim=0,
++                    output_size=quads_cuda.shape[0],
++                )
+                 quads_scaled = quads_cuda * scale_per_region.view(-1, 1, 1)
+ 
+                 seq_ids = rec_ids
+diff --git a/nemotron-ocr/tests/test_relational_encoder_staging.py b/nemotron-ocr/tests/test_relational_encoder_staging.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..94a73ec013115cb69f403b33ab2337f60b559b4c
+--- /dev/null
++++ b/nemotron-ocr/tests/test_relational_encoder_staging.py
+@@ -0,0 +1,152 @@
++# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++
++import pytest
++import torch
++
++from nemotron_ocr.inference.encoders.relational_encoder import (
++    RelationalTargetEncoder,
++    _copy_tensors_to_cpu_batched,
++)
++
++
++pytestmark = pytest.mark.skipif(
++    not torch.cuda.is_available(), reason="CUDA is required for D2H staging tests"
++)
++
++
++def _canonical_graph(graph):
++    return tuple(
++        tuple(tuple(line) for line in paragraph) for paragraph in graph.paragraphs
++    )
++
++
++def test_batched_cpu_copy_preserves_noncontiguous_views_on_current_stream():
++    expected_base = (
++        torch.arange(42, dtype=torch.float32).reshape(6, 7).mul_(3).add_(1)
++    )
++    expected = [expected_base[:, 1:6], expected_base.t()[1:5, ::2]]
++
++    stream = torch.cuda.Stream()
++    with torch.cuda.stream(stream):
++        base = torch.arange(42, dtype=torch.float32, device="cuda").reshape(6, 7)
++        base.mul_(3).add_(1)
++        sources = [base[:, 1:6], base.t()[1:5, ::2]]
++        actual = _copy_tensors_to_cpu_batched(sources)
++
++    for source, copied in zip(expected, actual):
++        assert copied.is_pinned()
++        torch.testing.assert_close(copied, source, rtol=0, atol=0)
++
++
++def test_batched_relational_conversion_matches_sequential_graph_build():
++    encoder = RelationalTargetEncoder(input_size=[768, 768], is_train=False)
++
++    # The first matrix includes an exact 0.5 tie in row 0. The C++ graph
++    # conversion selects the first qualifying column; staging must not alter it.
++    word_relations = [
++        torch.tensor(
++            [
++                [0.0, 0.5, 0.5, 0.0],
++                [0.0, 0.0, 0.0, 0.0],
++                [0.0, 0.0, 0.0, 0.9],
++                [0.0, 0.0, 0.0, 0.0],
++            ],
++            dtype=torch.float32,
++            device="cuda",
++        ),
++        torch.tensor(
++            [
++                [0.0, 0.8, 0.0],
++                [0.0, 0.0, 0.8],
++                [0.0, 0.0, 0.0],
++            ],
++            dtype=torch.float32,
++            device="cuda",
++        ),
++        torch.empty((0, 0), dtype=torch.float32, device="cuda"),
++    ]
++    line_logits = [
++        torch.tensor(
++            [
++                [2.0, -torch.inf, 0.2, 3.0, 0.1],
++                [1.0, 0.3, -torch.inf, 0.2, 2.5],
++                [0.5, 2.0, 0.1, -torch.inf, 0.2],
++                [1.5, 0.2, 2.2, 0.1, -torch.inf],
++            ],
++            dtype=torch.float32,
++            device="cuda",
++        ),
++        torch.tensor(
++            [
++                [2.0, -torch.inf, 1.0, 0.2],
++                [0.5, 0.3, -torch.inf, 2.0],
++                [1.0, 2.0, 0.2, -torch.inf],
++            ],
++            dtype=torch.float32,
++            device="cuda",
++        ),
++        torch.empty((0, 1), dtype=torch.float32, device="cuda"),
++    ]
++    line_uncertainty = [
++        torch.tensor(
++            [
++                [0.1, 0.0, 0.2, -0.1, 0.3],
++                [0.2, 0.1, 0.0, 0.3, -0.2],
++                [0.0, 0.2, 0.1, -0.1, 0.2],
++                [0.3, -0.1, 0.2, 0.1, 0.0],
++            ],
++            dtype=torch.float32,
++            device="cuda",
++        ),
++        torch.tensor(
++            [
++                [0.0, 0.1, -0.1, 0.2],
++                [0.2, 0.0, 0.1, -0.2],
++                [0.1, -0.1, 0.2, 0.0],
++            ],
++            dtype=torch.float32,
++            device="cuda",
++        ),
++        torch.empty((0, 1), dtype=torch.float32, device="cuda"),
++    ]
++
++    region_counts = torch.tensor([4, 3, 0], dtype=torch.int64)
++    quads = torch.arange(7 * 4 * 2, dtype=torch.float32).reshape(7, 4, 2)
++
++    expected_graphs = []
++    for count, word_relation, line_relation, line_unc in zip(
++        region_counts.tolist(), word_relations, line_logits, line_uncertainty
++    ):
++        if count == 0:
++            expected_graphs.append(())
++            continue
++        expected_graphs.append(
++            _canonical_graph(
++                encoder.dense_relations_to_graph(
++                    word_relation.cpu(), line_relation, line_unc, is_gt=False
++                )
++            )
++        )
++
++    batch = encoder.convert_targets_to_labels(
++        {
++            "relations": word_relations,
++            "line_relations": line_logits,
++            "line_rel_var": line_uncertainty,
++            "region_counts": region_counts,
++            "quads": quads,
++        },
++        image_size=None,
++        is_gt=False,
++    )
++
++    assert len(batch) == 3
++    assert [len(example) for example in batch] == [4, 3, 0]
++    assert [_canonical_graph(example.relation_graph) for example in batch] == expected_graphs
++    torch.testing.assert_close(
++        torch.stack([region.region.vertices for example in batch for region in example]),
++        quads,
++        rtol=0,
++        atol=0,
++    )

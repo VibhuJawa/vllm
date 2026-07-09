@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import orjson
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -66,26 +66,38 @@ def _enable_ocr_profile_logging() -> None:
     logger.propagate = False
 
 
-def _json_to_tensor(payload: Any, *, device: torch.device) -> torch.Tensor:
-    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+def _json_to_bytes(payload: Any) -> bytes:
+    raw = orjson.dumps(payload, option=orjson.OPT_SERIALIZE_NUMPY)
     if len(raw) > _MAX_OUTPUT_BYTES:
         raise ValueError(
             f"Nemotron OCR payload is {len(raw)} bytes; "
             f"max supported is {_MAX_OUTPUT_BYTES}."
         )
+    return len(raw).to_bytes(4, "little") + raw
 
-    prefix = len(raw).to_bytes(4, "little")
-    return torch.tensor(list(prefix + raw), dtype=torch.uint8, device=device)
+
+def _json_to_tensor(payload: Any, *, device: torch.device) -> torch.Tensor:
+    encoded = _json_to_bytes(payload)
+
+    host_tensor = torch.frombuffer(bytearray(encoded), dtype=torch.uint8)
+    return host_tensor.to(device=device)
 
 
 def tensor_to_json(data: torch.Tensor) -> Any:
-    flat = data.detach().to("cpu", dtype=torch.uint8).flatten().tolist()
+    flat = (
+        data.detach()
+        .to("cpu", dtype=torch.uint8)
+        .contiguous()
+        .flatten()
+        .numpy()
+        .tobytes()
+    )
     if len(flat) < 4:
         raise ValueError("Nemotron OCR output tensor is too short.")
 
-    size = int.from_bytes(bytes(flat[:4]), "little")
-    raw = bytes(flat[4 : 4 + size])
-    return json.loads(raw.decode("utf-8"))
+    size = int.from_bytes(flat[:4], "little")
+    raw = flat[4 : 4 + size]
+    return orjson.loads(raw)
 
 
 def _image_to_chw_uint8(image: Any) -> torch.Tensor:
@@ -123,7 +135,10 @@ def _image_to_chw_uint8(image: Any) -> torch.Tensor:
             if np.issubdtype(array.dtype, np.floating):
                 array = np.clip(array, 0, 1) * 255
             array = np.clip(array, 0, 255).astype(np.uint8)
-        return torch.from_numpy(np.ascontiguousarray(array).copy()).permute(2, 0, 1)
+        array = np.ascontiguousarray(array)
+        if not array.flags.writeable:
+            array = array.copy()
+        return torch.from_numpy(array).permute(2, 0, 1)
 
     if isinstance(image, Image.Image):
         array = np.array(image.convert("RGB"), copy=True)
@@ -449,28 +464,22 @@ class NemotronOCRV2ForImageToText(nn.Module, IsAttentionFree, SupportsMultiModal
         payloads: list[dict[str, Any]],
         device: torch.device,
     ) -> torch.Tensor:
-        rows = [_json_to_tensor(payload, device=device) for payload in payloads]
-        if not rows:
-            rows = [
-                _json_to_tensor(
-                    {
-                        "backend": "vllm",
-                        "model": "nemotron-ocr-v2",
-                        "regions": [],
-                    },
-                    device=device,
-                )
+        if not payloads:
+            payloads = [
+                {
+                    "backend": "vllm",
+                    "model": "nemotron-ocr-v2",
+                    "regions": [],
+                }
             ]
 
-        max_len = max(row.shape[0] for row in rows)
-        output = torch.zeros(
-            (len(rows), max_len),
-            dtype=torch.uint8,
-            device=device,
-        )
-        for index, row in enumerate(rows):
-            output[index, : row.shape[0]] = row
-        return output
+        encoded = [_json_to_bytes(payload) for payload in payloads]
+
+        max_len = max(map(len, encoded))
+        output = np.zeros((len(encoded), max_len), dtype=np.uint8)
+        for index, row in enumerate(encoded):
+            output[index, : len(row)] = np.frombuffer(row, dtype=np.uint8)
+        return torch.from_numpy(output).to(device=device)
 
     def forward(
         self,

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Mapping, Sequence
 from io import BytesIO
 from pathlib import Path
@@ -12,6 +14,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.model_executor.models.nemotron_ocr import tensor_to_json
 from vllm.multimodal.media import MediaConnector, MediaWithBytes
@@ -22,6 +25,35 @@ from vllm.renderers import BaseRenderer
 
 OCRInput = Image.Image | np.ndarray | torch.Tensor | bytes | str | Path
 _URL_PREFIXES = ("data:", "http://", "https://", "file://")
+_BASE64_JPEG_PREFIXES = (
+    "data:image/jpeg;base64,",
+    "data:image/jpg;base64,",
+)
+
+
+def _decode_image_bytes(data: bytes) -> np.ndarray | Image.Image:
+    """Decode wire images without making vLLM treat pixels as embeddings."""
+    from torchvision.io import ImageReadMode, decode_image
+
+    try:
+        encoded = torch.frombuffer(bytearray(data), dtype=torch.uint8)
+        tensor = decode_image(encoded, mode=ImageReadMode.RGB)
+    except (RuntimeError, ValueError):
+        with Image.open(BytesIO(data)) as image:
+            return image.convert("RGB")
+
+    if (
+        envs.VLLM_MAX_IMAGE_PIXELS > 0
+        and tensor.shape[-2] * tensor.shape[-1] > envs.VLLM_MAX_IMAGE_PIXELS
+    ):
+        raise ValueError(
+            f"Image has {tensor.shape[-2] * tensor.shape[-1]} pixels, which "
+            f"exceeds the limit of {envs.VLLM_MAX_IMAGE_PIXELS}. Set "
+            "VLLM_MAX_IMAGE_PIXELS to increase this limit."
+        )
+    # The HTTP multimodal parser reserves torch.Tensor for precomputed image
+    # embeddings. Return HWC NumPy pixels so this remains ordinary image data.
+    return tensor.permute(1, 2, 0).contiguous().numpy()
 
 
 class NemotronOCRV2IOProcessor(IOProcessor[OCRInput | list[OCRInput], Any]):
@@ -83,11 +115,19 @@ class NemotronOCRV2IOProcessor(IOProcessor[OCRInput | list[OCRInput], Any]):
         if isinstance(data, np.ndarray | torch.Tensor):
             return data
         if isinstance(data, (bytes, bytearray)):
-            with Image.open(BytesIO(data)) as image:
-                return image.convert("RGB")
+            return _decode_image_bytes(bytes(data))
         if isinstance(data, (str, Path)):
             data_str = str(data)
-            if data_str.lower().startswith(_URL_PREFIXES):
+            data_str_lower = data_str.lower()
+            if data_str_lower.startswith(_BASE64_JPEG_PREFIXES):
+                try:
+                    encoded = data_str.split(",", 1)[1]
+                    return _decode_image_bytes(
+                        base64.b64decode(encoded, validate=True)
+                    )
+                except (IndexError, ValueError, binascii.Error) as exc:
+                    raise ValueError("Invalid base64 JPEG data URI.") from exc
+            if data_str_lower.startswith(_URL_PREFIXES):
                 fetched = self.media_connector.fetch_image(data_str)
                 if isinstance(fetched, MediaWithBytes):
                     fetched = fetched.media
@@ -98,8 +138,18 @@ class NemotronOCRV2IOProcessor(IOProcessor[OCRInput | list[OCRInput], Any]):
                 raise FileNotFoundError(
                     f"Nemotron OCR image path does not exist: {path}"
                 )
-            with Image.open(path) as image:
-                return image.convert("RGB")
+            # torchvision decodes directly to the CHW uint8 tensor consumed by
+            # the multimodal processor. Keep PIL as a fallback because
+            # torchvision does not support every format accepted by Pillow
+            # (notably TIFF and BMP in common builds).
+            from torchvision.io import ImageReadMode, read_image
+
+            try:
+                tensor = read_image(str(path), mode=ImageReadMode.RGB)
+                return tensor.permute(1, 2, 0).contiguous().numpy()
+            except (RuntimeError, ValueError):
+                with Image.open(path) as image:
+                    return image.convert("RGB")
 
         raise TypeError(
             "Nemotron OCR data must be an image, image path, bytes, "

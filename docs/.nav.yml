@@ -53,6 +53,7 @@ nav:
       - benchmarking/cli.md
       - benchmarking/sweeps.md
       - benchmarking/dashboard.md
+      - benchmarking/nemotron_ocr_v2_a100.md
   - API Reference:
     - api/README.md
     - api/vllm
