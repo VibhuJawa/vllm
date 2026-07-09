@@ -8,11 +8,19 @@ The exact model repository base is
 `0e83e83f17943524b90afa6c0fd82ac2bc1a40ca` from
 `nvidia/nemotron-ocr-v2`.
 
+The model-side changes are published for review in
+[`nvidia/nemotron-ocr-v2` PR #8](https://huggingface.co/nvidia/nemotron-ocr-v2/discussions/8)
+at commit
+[`bb392d4`](https://huggingface.co/nvidia/nemotron-ocr-v2/commit/bb392d494b616d3a1692c3dbe59f63c1d2a8a7fa).
+The checked-in patch remains the immutable copy used by this benchmark, so the
+result can be reproduced even before that PR is merged.
+
 The matched A100 results, raw JSON/CSV telemetry, exact 1,000-page input
 manifest, and final charts are published in
 [`VibhuJawa/nemotron-vllm-ocr`](https://github.com/VibhuJawa/nemotron-vllm-ocr/tree/main/results/a100-2026-07-08).
 The vLLM-native model/plugin and queueing changes live on
-[`agent/nemotron-ocr-v2-port`](https://github.com/VibhuJawa/vllm/tree/agent/nemotron-ocr-v2-port);
+[`VibhuJawa/vllm#1`](https://github.com/VibhuJawa/vllm/pull/1), pinned at
+[`267b6f6d6`](https://github.com/VibhuJawa/vllm/commit/267b6f6d6aecf5e33d82f549941f9ee486e29ab1);
 this directory carries the external model patch and reproducibility drivers
 needed to recreate the optimized deployment.
 
