@@ -108,35 +108,55 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     # offline APIs
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
-        assert isinstance(ctx.prompts, dict) and "data" in ctx.prompts
         assert ctx.pooling_params is not None
 
-        # Validate the request data is valid for the loaded plugin
-        prompt_data = ctx.prompts.get("data")
-        if prompt_data is None:
+        plugin_prompts = prompt_to_seq(ctx.prompts)
+        user_params = self._params_to_seq(ctx.pooling_params, len(plugin_prompts))
+
+        prompts_seq = []
+        params_seq: list[PoolingParams] = []
+        plugin_output_sizes: list[int] = []
+
+        for plugin_prompt, user_param in zip(plugin_prompts, user_params):
+            if not isinstance(plugin_prompt, dict) or "data" not in plugin_prompt:
+                raise ValueError(
+                    "Plugin pooling prompts must be dictionaries containing "
+                    "a non-None 'data' field."
+                )
+
+            # Validate the request data is valid for the loaded plugin
+            prompt_data = plugin_prompt.get("data")
+            if prompt_data is None:
+                raise ValueError(
+                    "The 'data' field of the prompt is expected to contain "
+                    "the prompt data and it cannot be None. "
+                    "Refer to the documentation of the IOProcessor "
+                    "in use for more details."
+                )
+            validated_prompt = self.io_processor.parse_data(prompt_data)
+
+            # obtain the actual model prompts from the pre-processor
+            prompts = self.io_processor.pre_process(prompt=validated_prompt)
+            prompt_seq = prompt_to_seq(prompts)
+            prompts_seq.extend(prompt_seq)
+            plugin_output_sizes.append(len(prompt_seq))
+
+            expanded_params = [
+                self.io_processor.merge_pooling_params(param)
+                for param in self._params_to_seq(user_param, len(prompt_seq))
+            ]
+            for p in expanded_params:
+                if p.task is None:
+                    p.task = "plugin"
+            params_seq.extend(expanded_params)
+
+        if not prompts_seq:
             raise ValueError(
-                "The 'data' field of the prompt is expected to contain "
-                "the prompt data and it cannot be None. "
-                "Refer to the documentation of the IOProcessor "
-                "in use for more details."
+                "The IOProcessor did not produce any model prompts from "
+                "the plugin request."
             )
-        validated_prompt = self.io_processor.parse_data(prompt_data)
 
-        # obtain the actual model prompts from the pre-processor
-        prompts = self.io_processor.pre_process(prompt=validated_prompt)
-        prompts_seq = prompt_to_seq(prompts)
-
-        params_seq: list[PoolingParams] = [
-            self.io_processor.merge_pooling_params(param)
-            for param in self._params_to_seq(
-                ctx.pooling_params,
-                len(prompts_seq),
-            )
-        ]
-        for p in params_seq:
-            if p.task is None:
-                p.task = "plugin"
-
+        ctx.plugin_output_sizes = plugin_output_sizes
         ctx.pooling_params = params_seq
         ctx.prompts = prompts_seq
         return super().pre_process_offline(ctx)
@@ -145,14 +165,21 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
         self,
         ctx: OfflineOutputsContext,
     ) -> list[PoolingRequestOutput]:
-        processed_outputs = self.io_processor.post_process(ctx.outputs)
-
-        return [
-            PoolingRequestOutput[Any](
-                request_id="",
-                outputs=processed_outputs,
-                num_cached_tokens=getattr(processed_outputs, "num_cached_tokens", 0),
-                prompt_token_ids=[],
-                finished=True,
+        plugin_output_sizes = ctx.plugin_output_sizes or [len(ctx.outputs)]
+        processed_outputs = []
+        offset = 0
+        for output_size in plugin_output_sizes:
+            output_batch = ctx.outputs[offset : offset + output_size]
+            offset += output_size
+            output = self.io_processor.post_process(output_batch)
+            processed_outputs.append(
+                PoolingRequestOutput[Any](
+                    request_id="",
+                    outputs=output,
+                    num_cached_tokens=getattr(output, "num_cached_tokens", 0),
+                    prompt_token_ids=[],
+                    finished=True,
+                )
             )
-        ]
+
+        return processed_outputs

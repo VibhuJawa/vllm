@@ -363,6 +363,62 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 }'
 ```
 
+## NVIDIA Nemotron OCR v2
+
+`nvidia/nemotron-ocr-v2` is exposed as a pooling plugin model because OCR
+returns structured JSON rather than embeddings, classifications, or generated
+tokens. The vLLM integration loads the Nemotron OCR pipeline once in the worker
+and uses the `nemotron_ocr_v2` IO processor to turn image inputs into plugin
+pooling requests.
+
+Start the server with the upstream Hugging Face repository:
+
+```shell
+vllm serve nvidia/nemotron-ocr-v2 \
+    --runner pooling \
+    --skip-tokenizer-init \
+    --enforce-eager \
+    --io-processor-plugin nemotron_ocr_v2 \
+    --hf-overrides '{
+        "model_type": "nemotron_ocr_v2",
+        "architectures": ["NemotronOCRV2ForImageToText"],
+        "nemotron_ocr_model_subdir": "v2_multilingual",
+        "io_processor_plugin": "nemotron_ocr_v2"
+    }'
+```
+
+Call the `/pooling` endpoint with an OpenAI-style image URL payload:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+    "model": "nvidia/nemotron-ocr-v2",
+    "data": {
+        "image_url": {
+            "url": "data:image/png;base64,<BASE64>"
+        }
+    }
+}'
+```
+
+For local files in online serving, prefer `file://` URLs and set
+`--allowed-local-media-path` to the directory that may be read. Offline Python
+usage can pass a local path directly; see
+[examples/pooling/plugin/nemotron_ocr_v2.py](../../../examples/pooling/plugin/nemotron_ocr_v2.py)
+and
+[examples/pooling/plugin/nemotron_ocr_v2_online.py](../../../examples/pooling/plugin/nemotron_ocr_v2_online.py).
+
+If you publish a model fork, include a vLLM-ready `config.json` so users do not
+need `--hf-overrides`:
+
+```json
+{
+    "model_type": "nemotron_ocr_v2",
+    "architectures": ["NemotronOCRV2ForImageToText"],
+    "nemotron_ocr_model_subdir": "v2_multilingual",
+    "io_processor_plugin": "nemotron_ocr_v2"
+}
+```
+
 ## BAAI/bge-m3
 
 The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`

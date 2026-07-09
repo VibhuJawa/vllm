@@ -131,7 +131,10 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs)
+            ctx=OfflineOutputsContext(
+                outputs=outputs,
+                plugin_output_sizes=ctx.plugin_output_sizes,
+            )
         )
         return outputs
 

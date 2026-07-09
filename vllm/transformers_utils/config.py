@@ -111,6 +111,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
+    nemotron_ocr_v2="NemotronOCRV2Config",
     olmo_hybrid="OlmoHybridConfig",
     openvla="OpenVLAConfig",
     ovis="OvisConfig",
@@ -257,12 +258,21 @@ class HFConfigParser(ConfigParserBase):
                 **kwargs,
             )
         else:
+            config: PretrainedConfig | None = None
             if model_type in _CONFIG_REGISTRY:
                 # Register the config class to AutoConfig to ensure it's used
                 # in future calls to `from_pretrained` (e.g. from
                 # AutoTokenizer or AutoProcessor).
                 config_class = _CONFIG_REGISTRY[model_type]
                 _register_config_class(model_type, config_class)
+                if config_dict.get("model_type") is None:
+                    config = config_class.from_pretrained(
+                        model,
+                        revision=revision,
+                        code_revision=code_revision,
+                        trust_remote_code=False,
+                        **kwargs,
+                    )
                 # If the on-disk model_type differs from the overridden
                 # one, register under both so AutoConfig.from_pretrained
                 # returns the correct class regardless of what the
@@ -274,30 +284,33 @@ class HFConfigParser(ConfigParserBase):
                     config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
-            try:
-                kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
-                config = AutoConfig.from_pretrained(
-                    model,
-                    trust_remote_code=trust_remote_code,
-                    revision=revision,
-                    code_revision=code_revision,
-                    **kwargs,
-                )
-            except ValueError as e:
-                if (
-                    not trust_remote_code
-                    and "requires you to execute the configuration file" in str(e)
-                ):
-                    err_msg = (
-                        "Failed to load the model config. If the model "
-                        "is a custom model not yet available in the "
-                        "HuggingFace transformers library, consider setting "
-                        "`trust_remote_code=True` in LLM or using the "
-                        "`--trust-remote-code` flag in the CLI."
+            if config is None:
+                try:
+                    kwargs = _maybe_update_auto_config_kwargs(
+                        kwargs, model_type=model_type
                     )
-                    raise RuntimeError(err_msg) from e
-                else:
-                    raise e
+                    config = AutoConfig.from_pretrained(
+                        model,
+                        trust_remote_code=trust_remote_code,
+                        revision=revision,
+                        code_revision=code_revision,
+                        **kwargs,
+                    )
+                except ValueError as e:
+                    if (
+                        not trust_remote_code
+                        and "requires you to execute the configuration file" in str(e)
+                    ):
+                        err_msg = (
+                            "Failed to load the model config. If the model "
+                            "is a custom model not yet available in the "
+                            "HuggingFace transformers library, consider setting "
+                            "`trust_remote_code=True` in LLM or using the "
+                            "`--trust-remote-code` flag in the CLI."
+                        )
+                        raise RuntimeError(err_msg) from e
+                    else:
+                        raise e
         config = _maybe_remap_hf_config_attrs(config)
         return config_dict, config
 

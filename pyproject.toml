@@ -47,6 +47,9 @@ vllm = "vllm.entrypoints.cli.main:main"
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
 lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver"
 
+[project.entry-points."vllm.io_processor_plugins"]
+nemotron_ocr_v2 = "vllm.plugins.io_processors.nemotron_ocr:get_io_processor_class"
+
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
 

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+<title>Nemotron OCR v2 benchmark chart</title>
+<rect x="0" y="0" width="1600" height="900" rx="0" fill="#FFFFFF"/>
+<rect x="0" y="0" width="18" height="900" rx="0" fill="#2F6BFF"/>
+<text x="72" y="82" font-family="DejaVu Sans, sans-serif" font-size="42" font-weight="bold" fill="#172B4D" text-anchor="start">Matched 30K throughput and speedup</text>
+<text x="72" y="128" font-family="DejaVu Sans, sans-serif" font-size="21" font-weight="normal" fill="#64748B" text-anchor="start">A100 · JPEG bytes · infer_length=1024 · 30K = 1K unique × 30</text>
+<text x="165" y="213" font-family="DejaVu Sans, sans-serif" font-size="18" font-weight="bold" fill="#64748B" text-anchor="start">Throughput (images/s)</text>
+<line x1="165" y1="700.0" x2="1450" y2="700.0" stroke="#DCE3EC" stroke-width="1"/>
+<text x="147" y="707.0" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="end">0</text>
+<line x1="165" y1="607.0" x2="1450" y2="607.0" stroke="#DCE3EC" stroke-width="1"/>
+<text x="147" y="614.0" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="end">20</text>
+<line x1="165" y1="514.0" x2="1450" y2="514.0" stroke="#DCE3EC" stroke-width="1"/>
+<text x="147" y="521.0" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="end">40</text>
+<line x1="165" y1="421.0" x2="1450" y2="421.0" stroke="#DCE3EC" stroke-width="1"/>
+<text x="147" y="428.0" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="end">60</text>
+<line x1="165" y1="328.0" x2="1450" y2="328.0" stroke="#DCE3EC" stroke-width="1"/>
+<text x="147" y="335.0" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="end">80</text>
+<line x1="165" y1="235.0" x2="1450" y2="235.0" stroke="#DCE3EC" stroke-width="1"/>
+<text x="147" y="242.0" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="end">100</text>
+<line x1="165" y1="235" x2="165" y2="700" stroke="#172B4D" stroke-width="2"/>
+<line x1="165" y1="700" x2="1450" y2="700" stroke="#172B4D" stroke-width="2"/>
+<line x1="165" y1="554.707555717887" x2="1450" y2="554.707555717887" stroke="#F59E0B" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="1108.8333333333333" y="544.707555717887" font-family="DejaVu Sans, sans-serif" font-size="15" font-weight="bold" fill="#F59E0B" text-anchor="end">Official HF reference</text>
+<rect x="264.16666666666663" y="554.707555717887" width="230" height="145.29244428211302" rx="8" fill="#F59E0B"/>
+<text x="379.16666666666663" y="536.707555717887" font-family="DejaVu Sans, sans-serif" font-size="28" font-weight="bold" fill="#172B4D" text-anchor="middle">31.25</text>
+<text x="379.16666666666663" y="740" font-family="DejaVu Sans, sans-serif" font-size="18" font-weight="bold" fill="#172B4D" text-anchor="middle">Official NVIDIA/HF baseline</text>
+<text x="379.16666666666663" y="772" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="middle">1.00× vs official HF</text>
+<rect x="692.5" y="489.9901939782885" width="230" height="210.00980602171148" rx="8" fill="#2F6BFF"/>
+<text x="807.5" y="471.9901939782885" font-family="DejaVu Sans, sans-serif" font-size="28" font-weight="bold" fill="#172B4D" text-anchor="middle">45.16</text>
+<text x="807.5" y="740" font-family="DejaVu Sans, sans-serif" font-size="18" font-weight="bold" fill="#172B4D" text-anchor="middle">Tuned clean vLLM baseline</text>
+<text x="807.5" y="772" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="middle">1.45× vs official HF</text>
+<rect x="1120.8333333333333" y="302.9172939189201" width="230" height="397.0827060810799" rx="8" fill="#009E9A"/>
+<text x="1235.8333333333333" y="284.9172939189201" font-family="DejaVu Sans, sans-serif" font-size="28" font-weight="bold" fill="#172B4D" text-anchor="middle">85.39</text>
+<text x="1235.8333333333333" y="740" font-family="DejaVu Sans, sans-serif" font-size="18" font-weight="bold" fill="#172B4D" text-anchor="middle">Optimized vLLM</text>
+<text x="1235.8333333333333" y="772" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="middle">2.73× vs official HF</text>
+<text x="1235.8333333333333" y="802" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="bold" fill="#009E9A" text-anchor="middle">1.89× vs clean vLLM</text>
+<polyline points="508.16666666666663,574.707555717887 678.5,509.9901939782885" fill="none" stroke="#2F6BFF" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="678.5,509.9901939782885 666.4982319278586,523.4505046412163 660.588150917129,507.8954237206099" fill="#2F6BFF"/>
+<text x="593.3333333333333" y="529.3488748480877" font-family="DejaVu Sans, sans-serif" font-size="15" font-weight="bold" fill="#2F6BFF" text-anchor="middle">1.45× · HF→clean vLLM</text>
+<polyline points="936.5,509.9901939782885 1106.8333333333333,330.9172939189201" fill="none" stroke="#009E9A" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+<polygon points="1106.8333333333333,330.9172939189201 1101.8344547521015,348.24454450665337 1089.7776639188896,336.77617954890206" fill="#009E9A"/>
+<text x="1021.6666666666666" y="407.4537439486043" font-family="DejaVu Sans, sans-serif" font-size="15" font-weight="bold" fill="#009E9A" text-anchor="middle">1.89× · clean→optimized</text>
+<polyline points="1362.8333333333333,320.9172939189201 1342,273" fill="none" stroke="#009E9A" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 7"/>
+<polygon points="1342,273 1351.631590577879,280.8071033642518 1341.1402873006916,285.36847986110854" fill="#009E9A"/>
+<polygon points="1354.1101984359802,253.75807358037434 1341.099433662148,274.9005663378521 1362.2419264196255,261.88980156401965" fill="#F59E0B" stroke="#C2413B" stroke-width="2"/>
+<polygon points="1355.7365440327094,257.0107647738325 1347.604816049064,268.3951839509359 1358.9892352261675,260.2634559672906" fill="#FFE08A"/>
+<polygon points="1372.0,257.0107647738325 1371.1868272016354,275.71373913621665 1363.0550992179901,262.70297436238417" fill="#2F6BFF" stroke="#172B4D" stroke-width="2"/>
+<polygon points="1358.9892352261675,244.0 1340.2862608637834,244.81317279836452 1353.297025637616,252.94490078200982" fill="#2F6BFF" stroke="#172B4D" stroke-width="2"/>
+<polygon points="1396.395183950936,219.6048160490641 1388.2634559672906,242.37365440327093 1365.4946176130838,265.1424927574778 1348.4179888474287,252.94490078200982 1373.6263455967292,227.73654403270942" fill="#FFFFFF" stroke="#172B4D" stroke-width="2.5"/>
+<polygon points="1396.395183950936,219.6048160490641 1388.2634559672906,242.37365440327093 1373.6263455967292,227.73654403270942" fill="#009E9A" stroke="#172B4D" stroke-width="2"/>
+<circle cx="1372.8131727983646" cy="243.18682720163548" r="6.324999999999999" fill="#DCE7FF" stroke="#2F6BFF" stroke-width="2"/>
+<text x="165" y="840" font-family="DejaVu Sans, sans-serif" font-size="17" font-weight="normal" fill="#64748B" text-anchor="start">Matched workload and quality configuration; engine startup and warmup excluded from timed spans.</text>
+</svg>

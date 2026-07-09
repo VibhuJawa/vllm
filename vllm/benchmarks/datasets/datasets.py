@@ -79,7 +79,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str | list[str] | list[dict]
+    prompt: str | dict[str, Any] | list[str] | list[dict[str, Any]]
     prompt_len: int
     expected_output_len: int = 0
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
@@ -2091,7 +2091,7 @@ def _parse_range_ratio(value: str) -> RangeRatio:
         return json.loads(value)
 
 
-def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
+def get_samples(args, tokenizer: TokenizerLike | None) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
 
@@ -2113,6 +2113,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
+
+    elif tokenizer is None:
+        raise ValueError("A tokenizer is required for every dataset except 'custom'.")
 
     elif args.dataset_name == "custom_image":
         dataset = CustomImageDataset(
@@ -2532,7 +2535,7 @@ class CustomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,

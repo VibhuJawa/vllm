@@ -1461,13 +1461,20 @@ class ModelConfig:
             A dictionary containing the non-default generation config.
         """
         if self.generation_config in {"auto", "vllm"}:
-            config = try_get_generation_config(
-                self.hf_config_path or self.model,
-                trust_remote_code=self.trust_remote_code,
-                revision=self.revision,
-                config_format=self.config_format,
-                hf_token=self.hf_token,
-            )
+            try:
+                config = try_get_generation_config(
+                    self.hf_config_path or self.model,
+                    trust_remote_code=self.trust_remote_code,
+                    revision=self.revision,
+                    config_format=self.config_format,
+                    hf_token=self.hf_token,
+                )
+            except ValueError:
+                if getattr(self.hf_config, "model_type", None) != "nemotron_ocr_v2":
+                    raise
+                from transformers import GenerationConfig
+
+                config = GenerationConfig.from_model_config(self.hf_config)
         else:
             config = try_get_generation_config(
                 self.generation_config,

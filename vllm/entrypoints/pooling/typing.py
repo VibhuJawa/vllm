@@ -119,6 +119,9 @@ class OfflineInputsContext:
     ## for bi-encoder & late-interaction
     n_queries: int | None = None
 
+    ## for IO processor plugins that expand one user request into N engine inputs
+    plugin_output_sizes: list[int] | None = None
+
 
 @dataclass
 class OfflineOutputsContext:
@@ -126,3 +129,6 @@ class OfflineOutputsContext:
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None
+
+    ## for IO processor plugins that expand one user request into N engine inputs
+    plugin_output_sizes: list[int] | None = None

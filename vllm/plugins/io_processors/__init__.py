@@ -12,6 +12,13 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 logger = logging.getLogger(__name__)
 
 
+_BUILTIN_IO_PROCESSOR_PLUGINS = {
+    "nemotron_ocr_v2": (
+        "vllm.plugins.io_processors.nemotron_ocr.NemotronOCRV2IOProcessor"
+    ),
+}
+
+
 def has_io_processor(
     vllm_config: VllmConfig,
     plugin_from_init: str | None = None,
@@ -60,7 +67,7 @@ def get_io_processor(
         IO_PROCESSOR_PLUGINS_GROUP
     )
 
-    loadable_plugins = {}
+    loadable_plugins = dict(_BUILTIN_IO_PROCESSOR_PLUGINS)
     for name, func in multimodal_data_processor_plugins.items():
         try:
             assert callable(func)

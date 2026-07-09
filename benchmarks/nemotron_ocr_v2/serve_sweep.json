@@ -1,0 +1,27 @@
+[
+  {
+    "_benchmark_name": "s32-rw1",
+    "max_num_seqs": 32,
+    "renderer_num_workers": 1
+  },
+  {
+    "_benchmark_name": "s32-rw4",
+    "max_num_seqs": 32,
+    "renderer_num_workers": 4
+  },
+  {
+    "_benchmark_name": "s64-rw1",
+    "max_num_seqs": 64,
+    "renderer_num_workers": 1
+  },
+  {
+    "_benchmark_name": "s64-rw4",
+    "max_num_seqs": 64,
+    "renderer_num_workers": 4
+  },
+  {
+    "_benchmark_name": "s96-rw4",
+    "max_num_seqs": 96,
+    "renderer_num_workers": 4
+  }
+]
